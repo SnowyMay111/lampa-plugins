@@ -1,5 +1,5 @@
 /*
- * Lampa Watch 1.1.0
+ * Lampa Watch 1.2.0
  * Подбор лучшей раздачи, прогноз «будет ли лагать», автопереключение TorrServer.
  * Файл собран из src/ командой node build.js. Править нужно исходники, а не этот файл.
  */
@@ -9,7 +9,7 @@
     if (window.lampa_watch_bundle) return;
     window.lampa_watch_bundle = true;
 
-    var LW = { version: '1.1.0' };
+    var LW = { version: '1.2.0' };
 
     // Каждый модуль в своей оболочке: сбой одного не мешает остальным
     function run(name, fn) {
@@ -738,6 +738,1272 @@
         })();
     });
 
+    run('list', function (LW) {
+        'use strict';
+
+        /*
+         * Список раздач: сортировка, фильтры и статистика. Только логика, без интерфейса.
+         *
+         * Работает с оценёнными раздачами из LW.score (entry: item, info, score, seeds, gb, forecast...).
+         * Все функции возвращают новые массивы и ничего не меняют в исходных данных.
+         */
+        LW.list = (function () {
+            // Порядок как в обычном списке Лампы, плюс «лучшие по пожеланиям» (по умолчанию)
+            var SORTS = [
+                ['best', 'Лучшие по пожеланиям'],
+                ['seeds', 'По раздающим'],
+                ['size', 'По размеру'],
+                ['name', 'По названию'],
+                ['tracker', 'По источнику'],
+                ['date', 'По дате'],
+                ['viewed', 'Просмотренные']
+            ];
+
+            // Фильтры: качество, HDR, Dolby Vision, субтитры, перевод, язык, сезон, трекер, год, 3D
+            var FILTERS = ['quality', 'hdr', 'dv', 'subs', 'voice', 'lang', 'season', 'tracker', 'year', 'd3'];
+
+            var KEY_LABEL = {
+                quality: 'Качество', hdr: 'HDR', dv: 'Dolby Vision', subs: 'Субтитры', voice: 'Перевод',
+                lang: 'Язык озвучки', season: 'Сезон', tracker: 'Трекер', year: 'Год', d3: '3D'
+            };
+
+            var QUALITY_NAME = { '2160': '4K', '1080': '1080p', '720': '720p', '480': 'SD', '0': 'Не указано' };
+
+            var VOICE_NAME = { dub: 'Дубляж', mvo: 'Многоголосая / закадровая', none: 'Не указан' };
+
+            var MAX_SEASONS = 60; // защита от раздач вроде «сезоны 1-999»
+
+            // ---------------------------------------------------------------- значения для фильтров
+
+            function yesNo(flag) {
+                return flag ? 'yes' : 'no';
+            }
+
+            // Какие значения этот фильтр видит у раздачи. У раздачи их может быть несколько (языки, сезоны).
+            function valuesOf(entry, key) {
+                var i = entry.info || {};
+                var out = [];
+                var n;
+
+                if (key === 'quality') return [String(i.quality || 0)];
+                if (key === 'hdr') return [yesNo(i.hdr)];
+                if (key === 'dv') return [yesNo(i.dv)];
+                if (key === 'subs') return [yesNo(i.subs)];
+                if (key === 'd3') return [yesNo(i.d3)];
+
+                if (key === 'voice') {
+                    if (i.dub) out.push('dub');
+                    if (i.mvo) out.push('mvo');
+
+                    return out.length ? out : ['none'];
+                }
+
+                if (key === 'lang') return i.langs && i.langs.length ? i.langs.slice() : ['?'];
+
+                if (key === 'season') {
+                    if (!i.seasons) return ['?'];
+
+                    for (n = i.seasons.from; n <= i.seasons.to && out.length < MAX_SEASONS; n++) out.push(String(n));
+
+                    return out.length ? out : ['?'];
+                }
+
+                if (key === 'tracker') return [(entry.item && entry.item.Tracker) || '?'];
+
+                if (key === 'year') {
+                    (i.years || []).forEach(function (y) {
+                        if (out.indexOf(String(y)) < 0) out.push(String(y));
+                    });
+
+                    return out.length ? out : ['?'];
+                }
+
+                return [];
+            }
+
+            function valueLabel(key, value, langNames) {
+                if (value === '?') return 'Не указано';
+
+                if (key === 'quality') return QUALITY_NAME[value] || value;
+                if (key === 'voice') return VOICE_NAME[value] || value;
+                if (key === 'lang') return (langNames && langNames[value]) || value;
+                if (key === 'season') return 'Сезон ' + value;
+                if (key === 'hdr' || key === 'dv' || key === 'subs' || key === 'd3') return value === 'yes' ? 'Есть' : 'Нет';
+
+                return value;
+            }
+
+            function compareValues(key, counts) {
+                return function (a, b) {
+                    if (a === '?' || b === '?') return a === '?' ? 1 : -1; // «не указано» всегда в конце
+
+                    if (key === 'quality' || key === 'year') return parseInt(b, 10) - parseInt(a, 10);
+                    if (key === 'season') return parseInt(a, 10) - parseInt(b, 10);
+                    if (key === 'hdr' || key === 'dv' || key === 'subs' || key === 'd3') return a === 'yes' ? -1 : 1;
+
+                    if (counts[b] !== counts[a]) return counts[b] - counts[a];
+
+                    return a < b ? -1 : a > b ? 1 : 0;
+                };
+            }
+
+            // Что можно выбрать в каждом фильтре и сколько раздач под каждое значение
+            function facets(entries) {
+                var out = {};
+
+                FILTERS.forEach(function (key) {
+                    var counts = {};
+
+                    entries.forEach(function (e) {
+                        valuesOf(e, key).forEach(function (v) { counts[v] = (counts[v] || 0) + 1; });
+                    });
+
+                    out[key] = Object.keys(counts).sort(compareValues(key, counts)).map(function (v) {
+                        return { value: v, count: counts[v] };
+                    });
+                });
+
+                return out;
+            }
+
+            // ---------------------------------------------------------------- отбор и порядок
+
+            // Мусор: камрипы, чужие фильмы и то, что парсер не смог разобрать. По умолчанию скрыт.
+            function isJunk(entry) {
+                return !(entry.playable && entry.relevance > 0);
+            }
+
+            function visible(entries, showJunk) {
+                return showJunk ? entries.slice() : entries.filter(function (e) { return !isJunk(e); });
+            }
+
+            function filter(entries, filters) {
+                var keys = Object.keys(filters || {}).filter(function (k) {
+                    return filters[k] !== null && filters[k] !== undefined && filters[k] !== '';
+                });
+
+                if (!keys.length) return entries.slice();
+
+                return entries.filter(function (e) {
+                    return keys.every(function (k) { return valuesOf(e, k).indexOf(String(filters[k])) >= 0; });
+                });
+            }
+
+            function activeCount(filters) {
+                return Object.keys(filters || {}).filter(function (k) {
+                    return filters[k] !== null && filters[k] !== undefined && filters[k] !== '';
+                }).length;
+            }
+
+            function timeOf(entry) {
+                var t = Date.parse(entry.item && entry.item.PublishDate);
+
+                return isNaN(t) ? 0 : t;
+            }
+
+            function titleOf(entry) {
+                return ((entry.item && entry.item.Title) || '').toLowerCase();
+            }
+
+            function trackerOf(entry) {
+                return ((entry.item && entry.item.Tracker) || '~').toLowerCase();
+            }
+
+            function isViewed(entry) {
+                return !!(entry.item && entry.item.viewed);
+            }
+
+            // Сравнение по месту в общем рейтинге: нужно, чтобы порядок не зависел от устойчивости sort() на старых ТВ
+            function byPlace(a, b) {
+                return (a.place || 0) - (b.place || 0);
+            }
+
+            function sort(entries, key) {
+                var list = entries.slice();
+                var cmp;
+
+                if (key === 'seeds') cmp = function (a, b) { return b.seeds - a.seeds || b.score - a.score; };
+                else if (key === 'size') cmp = function (a, b) { return b.gb - a.gb || b.score - a.score; };
+                else if (key === 'name') cmp = function (a, b) { var x = titleOf(a), y = titleOf(b); return x < y ? -1 : x > y ? 1 : 0; };
+                else if (key === 'tracker') cmp = function (a, b) { var x = trackerOf(a), y = trackerOf(b); return x < y ? -1 : x > y ? 1 : b.seeds - a.seeds; };
+                else if (key === 'date') cmp = function (a, b) { return timeOf(b) - timeOf(a); };
+                else if (key === 'viewed') cmp = function (a, b) { return (isViewed(b) ? 1 : 0) - (isViewed(a) ? 1 : 0); };
+                else cmp = function (a, b) { return b.score - a.score || b.seeds - a.seeds; };
+
+                list.sort(function (a, b) { return cmp(a, b) || byPlace(a, b); });
+
+                return list;
+            }
+
+            function sortName(key) {
+                var i;
+
+                for (i = 0; i < SORTS.length; i++) {
+                    if (SORTS[i][0] === key) return SORTS[i][1];
+                }
+
+                return SORTS[0][1];
+            }
+
+            // ---------------------------------------------------------------- дата
+
+            function dateLabel(entry) {
+                var t = timeOf(entry);
+
+                if (!t) return '';
+
+                var d = new Date(t);
+                var dd = d.getDate();
+                var mm = d.getMonth() + 1;
+
+                return (dd < 10 ? '0' : '') + dd + '.' + (mm < 10 ? '0' : '') + mm + '.' + d.getFullYear();
+            }
+
+            // ---------------------------------------------------------------- статистика
+
+            function median(nums) {
+                if (!nums.length) return 0;
+
+                var s = nums.slice().sort(function (a, b) { return a - b; });
+                var m = Math.floor(s.length / 2);
+
+                return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
+            }
+
+            // Сводка по набору раздач для шапки списка
+            function summary(entries) {
+                var out = {
+                    count: entries.length, hdr: 0, dv: 0, dub: 0, mvo: 0, subs: 0, viewed: 0, smooth: 0,
+                    maxSeeds: 0, medianSeeds: 0, minGb: 0, maxGb: 0, quality: [], trackers: [], langs: []
+                };
+                var q = {};
+                var tr = {};
+                var lg = {};
+                var seeds = [];
+                var sizes = [];
+
+                entries.forEach(function (e) {
+                    var i = e.info || {};
+                    var tracker = (e.item && e.item.Tracker) || '?';
+
+                    q[i.quality || 0] = (q[i.quality || 0] || 0) + 1;
+                    tr[tracker] = (tr[tracker] || 0) + 1;
+
+                    (i.langs || []).forEach(function (c) { lg[c] = (lg[c] || 0) + 1; });
+
+                    if (i.hdr) out.hdr++;
+                    if (i.dv) out.dv++;
+                    if (i.dub) out.dub++;
+                    if (i.mvo) out.mvo++;
+                    if (i.subs) out.subs++;
+                    if (isViewed(e)) out.viewed++;
+                    if (e.forecast && (e.forecast.level === 'smooth' || e.forecast.level === 'edge')) out.smooth++;
+                    if (e.seeds > out.maxSeeds) out.maxSeeds = e.seeds;
+
+                    seeds.push(e.seeds || 0);
+                    if (e.gb > 0) sizes.push(e.gb);
+                });
+
+                out.medianSeeds = median(seeds);
+
+                if (sizes.length) {
+                    out.minGb = Math.min.apply(null, sizes);
+                    out.maxGb = Math.max.apply(null, sizes);
+                }
+
+                out.quality = Object.keys(q).map(function (k) { return { value: k, count: q[k] }; })
+                    .sort(function (a, b) { return parseInt(b.value, 10) - parseInt(a.value, 10); });
+
+                out.trackers = Object.keys(tr).map(function (k) { return { value: k, count: tr[k] }; })
+                    .sort(function (a, b) { return b.count - a.count || (a.value < b.value ? -1 : 1); });
+
+                out.langs = Object.keys(lg).map(function (k) { return { value: k, count: lg[k] }; })
+                    .sort(function (a, b) { return b.count - a.count || (a.value < b.value ? -1 : 1); });
+
+                return out;
+            }
+
+            return {
+                SORTS: SORTS,
+                FILTERS: FILTERS,
+                KEY_LABEL: KEY_LABEL,
+                QUALITY_NAME: QUALITY_NAME,
+                valuesOf: valuesOf,
+                valueLabel: valueLabel,
+                facets: facets,
+                isJunk: isJunk,
+                visible: visible,
+                filter: filter,
+                activeCount: activeCount,
+                sort: sort,
+                sortName: sortName,
+                dateLabel: dateLabel,
+                summary: summary
+            };
+        })();
+    });
+
+    run('parser', function (LW) {
+        'use strict';
+
+        /*
+         * Автоподбор парсера. Проверяет на самом устройстве, какие парсеры отвечают (ваш Jackett или Prowlarr,
+         * поиск, встроенный в TorrServer, публичные Jackett-совместимые), оценивает их по тестовому запросу
+         * и записывает лучшие в настройки Лампы. Перед записью делает копию, чтобы всё можно было откатить.
+         *
+         * Здесь только логика и запросы. Окна и пункты настроек: setup.js.
+         */
+        LW.parser = (function () {
+            var PARSERS_URL = 'https://snowymay111.github.io/lampa-plugins/parsers.json';
+            var PROBE_QUERY = 'Fight Club';
+            var PROBE_MATCH = /fight[ ._\-]?club|бойцовск/i;
+            var CFG = window.lampa_watch_config || {}; // для тестов: сокращает ожидание
+            var PROBE_MS = CFG.probeMs || 10000;   // сколько ждём один парсер
+            var POOL = 6;           // сколько парсеров проверяем одновременно
+            var USEFUL = 15;        // ниже этой оценки парсер считаем бесполезным
+            var KEEP_RATIO = 0.8;   // если ваш текущий парсер не хуже 80% от лучшего, оставляем его
+
+            var STORE_BACKUP = 'lw_parser_backup';
+            var STORE_REMOTE = 'lw_parser_remote';
+            var REMOTE_TTL = 6 * 3600 * 1000;
+
+            // Настройки Лампы, которые мы читаем и можем менять. Только они попадают в копию для отката.
+            var KEYS = [
+                'parser_torrent_type', 'parser_use', 'parser_use_link',
+                'jackett_url', 'jackett_key', 'jackett_url_two', 'jackett_key_two',
+                'prowlarr_url', 'prowlarr_key', 'prowlarr_url_two', 'prowlarr_key_two',
+                'torrserver_search_type'
+            ];
+
+            // Публичные парсеры, проверенные вручную. Остальные подтягиваются из parsers.json на сайте плагина.
+            var BUILTIN = [
+                { type: 'jackett', url: 'https://jac.red', name: 'jac.red', key: '' },
+                { type: 'jackett', url: 'https://jr.maxvol.pro', name: 'jr.maxvol.pro', key: '' }
+            ];
+
+            var TYPE_NAME = { jackett: 'Jackett', prowlarr: 'Prowlarr', torrserver: 'Поиск TorrServer' };
+            var TYPE_ORDER = { jackett: 0, prowlarr: 1, torrserver: 2 };
+
+            var active = 0; // номер текущей проверки: отменённая молча затихает
+            var nets = [];  // запросы текущей проверки: их можно оборвать
+
+            // ---------------------------------------------------------------- мелочи
+
+            function L() {
+                return window.Lampa;
+            }
+
+            function trim(s) {
+                return String(s === undefined || s === null ? '' : s).replace(/^\s+|\s+$/g, '');
+            }
+
+            // Приводит ссылку к виду, с которым работает парсер Лампы: схема есть, косой черты в конце нет
+            function cleanUrl(u) {
+                u = trim(u);
+
+                if (!u) return '';
+
+                u = u.replace(/jacred\.xyz/i, 'jac.red'); // Лампа делает то же самое
+
+                if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
+
+                return u.replace(/\/+$/, '');
+            }
+
+            function hostOf(u) {
+                return String(u || '').replace(/^[a-z]+:\/\//i, '').replace(/[\/?#].*$/, '');
+            }
+
+            function splitTrackers(s) {
+                return String(s || '').toLowerCase().split(/[,;|]/).map(trim).filter(function (t) { return !!t; });
+            }
+
+            function num(v) {
+                var n = parseInt(v, 10);
+
+                return isNaN(n) ? 0 : n;
+            }
+
+            function store() {
+                return L().Storage;
+            }
+
+            function getSetting(key) {
+                try {
+                    var v = store().get(key, '');
+
+                    return v === undefined || v === null ? '' : v;
+                } catch (e) {
+                    return '';
+                }
+            }
+
+            function sameValue(a, b) {
+                return trim(a) === trim(b);
+            }
+
+            // ---------------------------------------------------------------- кандидаты
+
+            function makeCand(type, url, key, extra) {
+                var c = { type: type, url: cleanUrl(url), key: trim(key), path: '', name: '', origin: 'seed', current: false, slot: 0 };
+                var k;
+
+                for (k in extra) c[k] = extra[k];
+
+                if (!c.name) c.name = hostOf(c.url);
+                c.id = type + '|' + c.url + c.path;
+
+                return c;
+            }
+
+            // Что сейчас стоит в Лампе и какие ссылки реально используются
+            function readCurrent() {
+                var type = trim(getSetting('parser_torrent_type')) || 'jackett';
+                var use = trim(getSetting('parser_use_link')) || 'one';
+                var out = {
+                    type: type, use: use, search: trim(getSetting('torrserver_search_type')) || 'both',
+                    parser_use: getSetting('parser_use'),
+                    jackett: [{ url: cleanUrl(getSetting('jackett_url')), key: trim(getSetting('jackett_key')) }, { url: cleanUrl(getSetting('jackett_url_two')), key: trim(getSetting('jackett_key_two')) }],
+                    prowlarr: [{ url: cleanUrl(getSetting('prowlarr_url')), key: trim(getSetting('prowlarr_key')) }, { url: cleanUrl(getSetting('prowlarr_url_two')), key: trim(getSetting('prowlarr_key_two')) }]
+                };
+
+                // какие из двух ссылок включены, как в parser.js Лампы
+                out.used = use === 'two' ? [1] : use === 'both' ? [0, 1] : [0];
+
+                return out;
+            }
+
+            // Список для проверки: ваши ссылки, встроенный поиск TorrServer, публичные из seeds.
+            // torrUrl: адрес TorrServer (может быть пустым), seeds: [{type,url,key,name}].
+            function candidates(cur, torrUrl, seeds) {
+                var out = [];
+                var seen = {};
+
+                function add(c) {
+                    if (!c.url || seen[c.id]) return;
+
+                    seen[c.id] = true;
+                    out.push(c);
+                }
+
+                ['jackett', 'prowlarr'].forEach(function (type) {
+                    cur[type].forEach(function (link, i) {
+                        if (!link.url) return;
+
+                        add(makeCand(type, link.url, link.key, {
+                            origin: 'current', slot: i + 1,
+                            current: cur.type === type && cur.used.indexOf(i) >= 0
+                        }));
+                    });
+                });
+
+                torrUrl = cleanUrl(torrUrl);
+
+                if (torrUrl) {
+                    add(makeCand('torrserver', torrUrl, '', { path: '/search/', origin: 'torrserver', name: 'Rutor в TorrServer', current: cur.type === 'torrserver' && cur.search !== 'torznab' }));
+                    add(makeCand('torrserver', torrUrl, '', { path: '/torznab/search/', origin: 'torrserver', name: 'Torznab в TorrServer', current: cur.type === 'torrserver' && cur.search !== 'rutor' }));
+                }
+
+                (seeds || []).forEach(function (s) {
+                    if (s && s.url) add(makeCand(s.type === 'prowlarr' ? 'prowlarr' : 'jackett', s.url, s.key, { name: s.name || '' }));
+                });
+
+                return out;
+            }
+
+            // ---------------------------------------------------------------- запрос и разбор ответа
+
+            function probeUrl(c, query) {
+                var q = encodeURIComponent(query || PROBE_QUERY);
+
+                if (c.type === 'jackett') return c.url + '/api/v2.0/indexers/all/results?apikey=' + encodeURIComponent(c.key) + '&Query=' + q;
+                if (c.type === 'prowlarr') return c.url + '/api/v1/search?apikey=' + encodeURIComponent(c.key) + '&query=' + q;
+
+                return c.url + c.path + '?query=' + q;
+            }
+
+            // Приводит ответ любого парсера к одному виду. null значит «это не ответ парсера».
+            function normalize(c, json) {
+                var rows;
+
+                if (c.type === 'jackett') {
+                    if (!json || !Array.isArray(json.Results)) return null;
+
+                    return json.Results.map(function (r) {
+                        return { title: String(r.Title || ''), tracker: r.Tracker, seeders: num(r.Seeders) };
+                    });
+                }
+
+                if (!Array.isArray(json)) return null;
+
+                rows = json;
+
+                if (c.type === 'prowlarr') {
+                    return rows.filter(function (r) { return !r.protocol || r.protocol === 'torrent'; }).map(function (r) {
+                        return { title: String(r.title || ''), tracker: r.indexer, seeders: num(r.seeders) };
+                    });
+                }
+
+                return rows.map(function (r) {
+                    return { title: String(r.Title || ''), tracker: r.Tracker, seeders: num(r.Seed) };
+                });
+            }
+
+            function evaluate(items, ms) {
+                var ev = { count: items.length, relevant: 0, trackers: [], seeded: 0, ms: ms };
+                var seen = {};
+
+                items.forEach(function (it) {
+                    if (it.seeders > 0) ev.seeded++;
+
+                    if (!PROBE_MATCH.test(it.title)) return;
+
+                    ev.relevant++;
+
+                    splitTrackers(it.tracker).forEach(function (t) {
+                        if (seen[t]) return;
+
+                        seen[t] = true;
+                        ev.trackers.push(t);
+                    });
+                });
+
+                return ev;
+            }
+
+            // Оценка 0..100: сколько нашлось (до 30), сколько разных трекеров (до 40), живые ли раздачи (до 10), как быстро (до 20)
+            function rate(ev) {
+                var s;
+
+                if (!ev || !ev.count) return 0;
+                if (!ev.relevant) return 3; // отвечает, но по тестовому запросу пусто
+
+                s = Math.min(ev.relevant, 60) / 2;
+                s += Math.min(ev.trackers.length, 10) * 4;
+                s += 10 * ev.seeded / ev.count;
+                s += ev.ms < 2000 ? 20 : ev.ms < 4000 ? 14 : ev.ms < 8000 ? 6 : 0;
+
+                return Math.round(s);
+            }
+
+            function now() {
+                return new Date().getTime();
+            }
+
+            // Проверяет один парсер. Всегда вызывает done(result) ровно один раз.
+            function probe(c, query, done) {
+                var started = now();
+                var finished = false;
+                var net = null;
+                var timer = null;
+
+                function finish(res) {
+                    if (finished) return;
+
+                    finished = true;
+
+                    if (timer) clearTimeout(timer);
+
+                    res.cand = c;
+                    res.ms = now() - started;
+                    done(res);
+                }
+
+                function fail(text) {
+                    finish({ ok: false, error: text, ev: null, rating: 0 });
+                }
+
+                try {
+                    net = new (L().Reguest)();
+                    net.timeout(PROBE_MS);
+                    nets.push(net);
+                } catch (e) {
+                    return fail('нет сетевого модуля');
+                }
+
+                // свой таймер: на старых ТВ запрос иногда зависает дольше заявленного таймаута
+                timer = setTimeout(function () {
+                    try { net.clear(); } catch (e) {}
+                    fail('не ответил за ' + Math.round(PROBE_MS / 1000) + ' с');
+                }, PROBE_MS + 1500);
+
+                try {
+                    net.native(probeUrl(c, query), function (json) {
+                        var items = normalize(c, json);
+                        var ms = now() - started;
+                        var ev;
+
+                        if (!items) return fail('ответ не похож на парсер');
+
+                        ev = evaluate(items, ms);
+
+                        finish({ ok: true, ev: ev, rating: rate(ev), error: '' });
+                    }, function () {
+                        fail('нет ответа');
+                    });
+                } catch (e) {
+                    fail('' + e);
+                }
+            }
+
+            // Проверяет всех с ограничением по числу одновременных запросов.
+            // opts.onResult(res) вызывается по мере готовности, done(results) в конце.
+            function probeAll(list, opts, done) {
+                var mine = ++active;
+                var results = [];
+                var next = 0;
+                var running = 0;
+                var left = list.length;
+
+                nets = [];
+
+                function finishAll() {
+                    if (mine !== active) return;
+
+                    results.sort(function (a, b) { return b.rating - a.rating; });
+                    done(results);
+                }
+
+                function pump() {
+                    while (running < POOL && next < list.length) {
+                        (function (c) {
+                            running++;
+
+                            if (opts.onStart) opts.onStart(c);
+
+                            probe(c, opts.query, function (res) {
+                                running--;
+                                left--;
+
+                                if (mine !== active) return;
+
+                                results.push(res);
+
+                                if (opts.onResult) opts.onResult(res, list.length - left, list.length);
+
+                                if (!left) finishAll();
+                                else pump();
+                            });
+                        })(list[next++]);
+                    }
+                }
+
+                if (!list.length) return finishAll();
+
+                pump();
+            }
+
+            function cancel() {
+                active++;
+
+                nets.forEach(function (n) { try { n.clear(); } catch (e) {} });
+                nets = [];
+            }
+
+            // ---------------------------------------------------------------- выбор лучших
+
+            function newTrackers(a, b) {
+                var have = {};
+                var n = 0;
+
+                a.ev.trackers.forEach(function (t) { have[t] = true; });
+                b.ev.trackers.forEach(function (t) { if (!have[t]) n++; });
+
+                return n;
+            }
+
+            // Оценка с поправкой: то, что у вас уже включено, получает бонус, чтобы без причины не менять настройки
+            function adjusted(r) {
+                return r.rating + (r.cand.current ? 8 : 0);
+            }
+
+            function pickSecond(group, primary) {
+                var i;
+                var r;
+
+                for (i = 0; i < group.length; i++) {
+                    r = group[i];
+
+                    if (r === primary || r.rating < 35) continue;
+                    if (newTrackers(primary, r) < 3) continue;
+                    if (r.ms > Math.max(6000, primary.ms * 2.5)) continue; // медленный второй тормозил бы каждый поиск
+
+                    return r;
+                }
+
+                return null;
+            }
+
+            function setting(plan, key, value) {
+                plan.settings[key] = value;
+            }
+
+            // Из результатов проверки собирает план: что записать в настройки. null, если рабочего парсера нет.
+            function choose(results, cur) {
+                var alive = results.filter(function (r) { return r.ok && r.rating >= USEFUL; });
+                var plan;
+                var top;
+                var group;
+                var primary;
+                var second;
+                var searchModes;
+                var keep;
+
+                if (!alive.length) return null;
+
+                alive.sort(function (a, b) {
+                    return adjusted(b) - adjusted(a) || TYPE_ORDER[a.cand.type] - TYPE_ORDER[b.cand.type] || a.ms - b.ms;
+                });
+
+                top = alive[0];
+
+                // свой парсер того же типа, который и так хорошо работает, не трогаем
+                keep = null;
+
+                alive.forEach(function (r) {
+                    if (r.cand.current && r.cand.type === top.cand.type && r.rating >= KEEP_RATIO * top.rating && (!keep || adjusted(r) > adjusted(keep))) keep = r;
+                });
+
+                if (keep) top = keep;
+
+                plan = { type: top.cand.type, settings: {}, primary: top, secondary: null, mode: 'one', results: results, changes: [] };
+
+                if (plan.type === 'torrserver') {
+                    group = alive.filter(function (r) { return r.cand.type === 'torrserver'; });
+                    searchModes = { rutor: false, torznab: false };
+
+                    group.forEach(function (r) { searchModes[r.cand.path === '/search/' ? 'rutor' : 'torznab'] = true; });
+
+                    plan.mode = searchModes.rutor && searchModes.torznab ? 'both' : searchModes.torznab ? 'torznab' : 'rutor';
+                    plan.group = group;
+
+                    setting(plan, 'parser_torrent_type', 'torrserver');
+                    setting(plan, 'torrserver_search_type', plan.mode);
+                } else {
+                    group = alive.filter(function (r) { return r.cand.type === plan.type; });
+                    primary = top;
+                    second = pickSecond(group, primary);
+
+                    plan.group = group;
+                    plan.secondary = second;
+                    plan.mode = second ? 'both' : 'one';
+
+                    setting(plan, 'parser_torrent_type', plan.type);
+                    setting(plan, plan.type + '_url', primary.cand.url);
+                    setting(plan, plan.type + '_key', primary.cand.key);
+                    setting(plan, 'parser_use_link', second ? 'both' : 'one');
+
+                    if (second) {
+                        setting(plan, plan.type + '_url_two', second.cand.url);
+                        setting(plan, plan.type + '_key_two', second.cand.key);
+                    }
+                }
+
+                if (!cur.parser_use || String(cur.parser_use) === 'false') setting(plan, 'parser_use', 'true');
+
+                plan.changes = diff(plan.settings);
+                plan.changed = plan.changes.length > 0;
+
+                return plan;
+            }
+
+            // Что изменится в настройках: [{key, from, to}]
+            function diff(settings) {
+                var out = [];
+
+                Object.keys(settings).forEach(function (k) {
+                    var from = getSetting(k);
+
+                    if (!sameValue(from, settings[k])) out.push({ key: k, from: from, to: settings[k] });
+                });
+
+                return out;
+            }
+
+            // ---------------------------------------------------------------- запись и откат
+
+            function readAll() {
+                var out = {};
+
+                KEYS.forEach(function (k) { out[k] = getSetting(k); });
+
+                return out;
+            }
+
+            function loadBackup() {
+                try {
+                    var b = store().get(STORE_BACKUP, '');
+
+                    return b && typeof b === 'object' && b.values ? b : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function hasBackup() {
+                return !!loadBackup();
+            }
+
+            // Записывает план в настройки Лампы. Прежние значения сохраняются для отката.
+            function apply(plan) {
+                var changes = diff(plan.settings);
+                var before;
+
+                if (!changes.length) return changes;
+
+                before = readAll();
+
+                store().set(STORE_BACKUP, { at: now(), values: before, summary: describe(plan) });
+
+                changes.forEach(function (c) { store().set(c.key, c.to); });
+
+                return changes;
+            }
+
+            // Возвращает настройки, какими они были до последнего подбора. true, если откатили.
+            function rollback() {
+                var b = loadBackup();
+
+                if (!b) return false;
+
+                KEYS.forEach(function (k) {
+                    if (b.values.hasOwnProperty(k)) store().set(k, b.values[k]);
+                });
+
+                store().set(STORE_BACKUP, { at: 0, values: null });
+
+                return true;
+            }
+
+            // ---------------------------------------------------------------- текст
+
+            function labelOf(c) {
+                if (c.type === 'torrserver') return c.name;
+
+                return c.name || hostOf(c.url);
+            }
+
+            function describe(plan) {
+                if (!plan) return '';
+
+                if (plan.type === 'torrserver') return TYPE_NAME.torrserver + ' (' + plan.mode + ')';
+
+                return TYPE_NAME[plan.type] + ': ' + labelOf(plan.primary.cand) + (plan.secondary ? ' + ' + labelOf(plan.secondary.cand) : '');
+            }
+
+            // Что сейчас стоит: для строки в настройках
+            function currentLabel() {
+                var cur = readCurrent();
+                var urls;
+
+                if (cur.type === 'torrserver') return TYPE_NAME.torrserver;
+
+                urls = cur.used.map(function (i) { return cur[cur.type][i].url; }).filter(function (u) { return !!u; }).map(hostOf);
+
+                return TYPE_NAME[cur.type] + (urls.length ? ': ' + urls.join(' + ') : ': не задан');
+            }
+
+            // ---------------------------------------------------------------- список публичных парсеров
+
+            function validSeeds(list) {
+                return (list || []).filter(function (s) { return s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url); }).map(function (s) {
+                    return { type: s.type === 'prowlarr' ? 'prowlarr' : 'jackett', url: s.url, key: s.key || '', name: s.name || '' };
+                });
+            }
+
+            // Свежий список с сайта плагина, при неудаче последний сохранённый, иначе встроенный
+            function loadSeeds(done) {
+                var cached = null;
+                var net;
+                var called = false;
+
+                function finish(list) {
+                    if (called) return;
+
+                    called = true;
+                    done(list);
+                }
+
+                try {
+                    cached = store().get(STORE_REMOTE, '');
+                } catch (e) {}
+
+                if (cached && cached.list && cached.at && now() - cached.at < REMOTE_TTL) return finish(validSeeds(cached.list).concat(BUILTIN));
+
+                try {
+                    net = new (L().Reguest)();
+                    net.timeout(4000);
+
+                    net.silent(PARSERS_URL + '?t=' + Math.floor(now() / 60000), function (json) {
+                        var list = validSeeds(json && json.parsers);
+
+                        if (list.length) {
+                            try { store().set(STORE_REMOTE, { at: now(), list: list }); } catch (e) {}
+                        }
+
+                        finish(list.concat(BUILTIN));
+                    }, function () {
+                        finish(validSeeds(cached && cached.list).concat(BUILTIN));
+                    });
+                } catch (e) {
+                    finish(BUILTIN.slice());
+                }
+            }
+
+            // Адрес TorrServer, который сейчас используется (с учётом выбранной в Лампе основной или дополнительной ссылки)
+            function torrUrl() {
+                var two = trim(getSetting('torrserver_use_link')) === 'two';
+
+                return cleanUrl(getSetting(two ? 'torrserver_url_two' : 'torrserver_url'));
+            }
+
+            // ---------------------------------------------------------------- всё вместе
+
+            // opts: { torrUrl, query, onList(list), onStart(c), onResult(res, n, total) }. done({ results, plan, cur, total }).
+            function run(opts, done) {
+                loadSeeds(function (seeds) {
+                    var cur = readCurrent();
+                    var list = candidates(cur, opts.torrUrl === undefined ? torrUrl() : opts.torrUrl, seeds);
+
+                    if (opts.onList) opts.onList(list);
+
+                    probeAll(list, opts, function (results) {
+                        done({ results: results, plan: choose(results, cur), cur: cur, total: list.length });
+                    });
+                });
+            }
+
+            return {
+                KEYS: KEYS,
+                TYPE_NAME: TYPE_NAME,
+                PROBE_QUERY: PROBE_QUERY,
+                cleanUrl: cleanUrl,
+                hostOf: hostOf,
+                readCurrent: readCurrent,
+                torrUrl: torrUrl,
+                candidates: candidates,
+                probeUrl: probeUrl,
+                normalize: normalize,
+                evaluate: evaluate,
+                rate: rate,
+                probe: probe,
+                probeAll: probeAll,
+                cancel: cancel,
+                choose: choose,
+                diff: diff,
+                apply: apply,
+                rollback: rollback,
+                hasBackup: hasBackup,
+                loadBackup: loadBackup,
+                describe: describe,
+                labelOf: labelOf,
+                currentLabel: currentLabel,
+                loadSeeds: loadSeeds,
+                run: run
+            };
+        })();
+    });
+
+    run('tune', function (LW) {
+        'use strict';
+
+        /*
+         * Автонастройка TorrServer. Читает его настройки, предлагает изменения, которые ускоряют старт
+         * и дают больше источников, и записывает их. Перед записью сохраняет полную копию, чтобы откатить.
+         *
+         * Принципы: меняем только то, что сервер сам показал в настройках (разные версии TorrServer
+         * отличаются набором полей), ничего не уменьшаем без причины и отправляем настройки целиком,
+         * потому что TorrServer при записи заменяет их все, а не только присланные поля.
+         *
+         * Здесь логика и запросы. Окна: setup.js.
+         */
+        LW.tune = (function () {
+            var STORE_BACKUP = 'lw_ts_backup';
+            var STORE_LINE = 'lw_line_peak';
+            var TRACKERS_URL = 'https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best.txt';
+            var MB = 1048576;
+            var START_SECONDS = 8;   // столько секунд предзагрузки на вашей скорости достаточно для ровного старта
+            var START_MIN = 32 * MB;
+            var START_MAX = 192 * MB;
+            var DEFAULT_LINE = 40;   // Мбит/с, если скорость ещё не измеряли
+            var CFG = window.lampa_watch_config || {}; // для тестов: сокращает ожидание
+            var TIMEOUT = CFG.tuneMs || 6000;
+            var VERIFY_DELAY = CFG.verifyDelay === undefined ? 1500 : CFG.verifyDelay;
+
+            var RETRACKERS = { 0: 'не трогать', 1: 'добавлять открытые трекеры', 2: 'удалять трекеры раздачи', 3: 'заменять на свои' };
+
+            function L() {
+                return window.Lampa;
+            }
+
+            function has(obj, key) {
+                return Object.prototype.hasOwnProperty.call(obj, key);
+            }
+
+            function num(v) {
+                var n = parseFloat(v);
+
+                return isNaN(n) ? 0 : n;
+            }
+
+            // ---------------------------------------------------------------- подписи
+
+            function size(bytes) {
+                if (bytes >= 1024 * MB) return (Math.round(bytes / (1024 * MB) * 10) / 10) + ' ГБ';
+
+                return Math.round(bytes / MB) + ' МБ';
+            }
+
+            function onOff(v) {
+                return v ? 'включено' : 'выключено';
+            }
+
+            function limitText(v) {
+                return num(v) > 0 ? v + ' КБ/с' : 'без ограничений';
+            }
+
+            // ---------------------------------------------------------------- план
+
+            // Скорость вашей сети в Мбит/с: лучшее, что мерил плагин при проверке раздач
+            function lineMbps() {
+                try { return num(L().Storage.get(STORE_LINE, 0)); } catch (e) { return 0; }
+            }
+
+            // По настройкам сервера строит план. ctx: { line } (Мбит/с, 0 если неизвестно).
+            // Возвращает { changes: [{ key, label, from, to, why, fromText, toText }], notes: [], next }
+            function plan(cur, ctx) {
+                var next = JSON.parse(JSON.stringify(cur));
+                var changes = [];
+                var notes = [];
+                var line = (ctx && ctx.line) || 0;
+
+                function change(key, label, to, fromText, toText, why) {
+                    changes.push({ key: key, label: label, from: next[key], to: to, fromText: fromText, toText: toText, why: why });
+                    next[key] = to;
+                }
+
+                // встроенный поиск: запасной парсер без Jackett
+                if (has(cur, 'EnableRutorSearch') && !cur.EnableRutorSearch) {
+                    change('EnableRutorSearch', 'Встроенный поиск Rutor', true, onOff(false), onOff(true),
+                        'Поиск прямо в TorrServer работает как запасной парсер, если Jackett недоступен.');
+                }
+
+                // трекеры: без них раздача берёт пиров только из DHT, старт дольше, скорость ниже
+                if (has(cur, 'RetrackersMode') && (num(cur.RetrackersMode) === 0 || num(cur.RetrackersMode) === 2)) {
+                    change('RetrackersMode', 'Трекеры в раздачах', 1, RETRACKERS[num(cur.RetrackersMode)], RETRACKERS[1],
+                        num(cur.RetrackersMode) === 2
+                            ? 'Сейчас трекеры из раздачи отбрасываются, остаётся только DHT: меньше источников и дольше старт.'
+                            : 'К раздаче добавятся открытые трекеры: больше пиров, быстрее старт.');
+                }
+
+                if (has(cur, 'TrackersListURL') && !String(cur.TrackersListURL || '').replace(/\s+/g, '')) {
+                    change('TrackersListURL', 'Список открытых трекеров', TRACKERS_URL, 'не задан', 'trackers_best.txt',
+                        'TorrServer сам подтянет свежий список рабочих трекеров, а не только встроенный старый.');
+                }
+
+                [['DisableDHT', 'DHT', 'Без DHT пиры ищутся только через трекеры.'],
+                 ['DisablePEX', 'PEX', 'PEX даёт пиров от уже подключённых раздающих.'],
+                 ['DisableTCP', 'Соединения TCP', 'Без TCP часть раздающих недоступна.'],
+                 ['DisableUTP', 'Соединения uTP', 'Без uTP часть раздающих недоступна.']].forEach(function (r) {
+                    if (has(cur, r[0]) && cur[r[0]]) change(r[0], r[1], false, onOff(false), onOff(true), r[2]);
+                });
+
+                if (has(cur, 'DownloadRateLimit') && num(cur.DownloadRateLimit) > 0) {
+                    change('DownloadRateLimit', 'Ограничение скорости загрузки', 0, limitText(cur.DownloadRateLimit), limitText(0),
+                        'Лимит режет скорость и может быть причиной подвисаний.');
+                }
+
+                if (has(cur, 'ConnectionsLimit') && num(cur.ConnectionsLimit) > 0 && num(cur.ConnectionsLimit) < 50) {
+                    change('ConnectionsLimit', 'Соединений на раздачу', 80, String(cur.ConnectionsLimit), '80',
+                        'Мало соединений: на раздаче с большим числом пиров скорость упирается в лимит.');
+                }
+
+                if (has(cur, 'CacheSize') && num(cur.CacheSize) > 0 && num(cur.CacheSize) < 128 * MB) {
+                    change('CacheSize', 'Размер кеша', 256 * MB, size(num(cur.CacheSize)), size(256 * MB),
+                        'Маленький кеш не успевает копить запас для 4K и фильмов большого размера.');
+                }
+
+                if (has(cur, 'ReaderReadAHead') && num(cur.ReaderReadAHead) > 0 && num(cur.ReaderReadAHead) < 70) {
+                    change('ReaderReadAHead', 'Упреждающее чтение', 95, cur.ReaderReadAHead + '%', '95%',
+                        'Чем больше читаем вперёд, тем меньше шанс остановки при просадке скорости.');
+                }
+
+                // предзагрузка: доля кеша, которую надо набрать перед стартом. При большом кеше она бывает огромной.
+                if (has(cur, 'PreloadCache') && num(next.CacheSize) > 0 && num(cur.PreloadCache) > 0) {
+                    preload(cur, next, line, change);
+                }
+
+                if (has(cur, 'CacheSize') && !cur.UseDisk && num(next.CacheSize) > 2048 * MB) {
+                    notes.push('Кеш ' + size(num(next.CacheSize)) + ' лежит в оперативной памяти компьютера с TorrServer. Если памяти мало, уменьшите его в настройках сервера.');
+                }
+
+                if (has(cur, 'DisableUPNP') && cur.DisableUPNP) {
+                    notes.push('UPnP выключен: входящие соединения возможны только если порт открыт на роутере вручную.');
+                }
+
+                return { changes: changes, notes: notes, next: next, line: line };
+            }
+
+            function preload(cur, next, line, change) {
+                var cache = num(next.CacheSize);
+                var pct = num(cur.PreloadCache);
+                var bytes = cache * pct / 100;
+                var lineBytes = (line || DEFAULT_LINE) / 8 * MB;
+                var target = Math.max(START_MIN, Math.min(START_MAX, lineBytes * START_SECONDS));
+                var want;
+
+                if (bytes > target * 1.5) {
+                    want = Math.max(1, Math.round(target / cache * 100));
+                    if (want >= pct) return;
+
+                    change('PreloadCache', 'Предзагрузка перед стартом', want, pct + '% кеша ≈ ' + size(bytes), want + '% кеша ≈ ' + size(cache * want / 100),
+                        'Перед стартом нужно набрать ' + size(bytes) + ', это долгое ожидание. ' + size(cache * want / 100) + ' хватает на ровный старт при вашей скорости.');
+                } else if (bytes < START_MIN / 2 && cache >= START_MIN) {
+                    want = Math.min(100, Math.ceil(START_MIN / cache * 100));
+                    if (want <= pct) return;
+
+                    change('PreloadCache', 'Предзагрузка перед стартом', want, pct + '% кеша ≈ ' + size(bytes), want + '% кеша ≈ ' + size(cache * want / 100),
+                        'Предзагрузка слишком мала: запаса на старте не хватит, фильм может сразу подвиснуть.');
+                }
+            }
+
+            // ---------------------------------------------------------------- запросы
+
+            function baseUrl() {
+                var u = '';
+
+                try { u = L().Torserver && L().Torserver.url ? L().Torserver.url() : ''; } catch (e) {}
+
+                if (!u && LW.parser) u = LW.parser.torrUrl();
+
+                return String(u || '').replace(/\/+$/, '');
+            }
+
+            function request(body, text, done) {
+                var u = baseUrl();
+                var net;
+                var finished = false;
+                var timer;
+
+                function finish(err, data) {
+                    if (finished) return;
+
+                    finished = true;
+                    clearTimeout(timer);
+                    done(err, data);
+                }
+
+                if (!u) return finish('Адрес TorrServer не задан в настройках Лампы');
+
+                try {
+                    net = new (L().Reguest)();
+                    net.timeout(TIMEOUT);
+                } catch (e) {
+                    return finish('нет сетевого модуля');
+                }
+
+                timer = setTimeout(function () {
+                    try { net.clear(); } catch (e) {}
+                    finish('TorrServer не ответил');
+                }, TIMEOUT + 1500);
+
+                try {
+                    net.silent(u + '/settings', function (json) { finish(null, json); }, function () { finish('TorrServer не ответил'); },
+                        JSON.stringify(body), text ? { dataType: 'text' } : undefined);
+                } catch (e) {
+                    finish('' + e);
+                }
+            }
+
+            // Читает настройки сервера: done(err, settings)
+            function load(done) {
+                request({ action: 'get' }, false, function (err, json) {
+                    if (err) return done(err);
+                    if (!json || typeof json !== 'object' || typeof json.CacheSize === 'undefined') return done('Это не TorrServer MatriX или версия слишком старая');
+
+                    done(null, json);
+                });
+            }
+
+            function store(key, value) {
+                try { L().Storage.set(key, value); } catch (e) {}
+            }
+
+            function loadBackup() {
+                try {
+                    var b = L().Storage.get(STORE_BACKUP, '');
+
+                    return b && typeof b === 'object' && b.settings ? b : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function hasBackup() {
+                return !!loadBackup();
+            }
+
+            // Записывает настройки целиком и проверяет, что сервер их принял: done(err)
+            function save(settings, keys, done) {
+                request({ action: 'set', sets: settings }, true, function (err) {
+                    if (err) return done(err);
+
+                    // после записи TorrServer перезапускает торрент-клиент, поэтому проверяем не сразу
+                    setTimeout(function () {
+                        load(function (e2, got) {
+                            var bad = [];
+
+                            if (e2) return done('Настройки отправлены, но проверить их не удалось: ' + e2);
+
+                            keys.forEach(function (k) {
+                                if (JSON.stringify(got[k]) !== JSON.stringify(settings[k])) bad.push(k);
+                            });
+
+                            done(bad.length ? 'Сервер не принял: ' + bad.join(', ') : null);
+                        });
+                    }, VERIFY_DELAY);
+                });
+            }
+
+            // Применяет план. Старые настройки сохраняются для отката. done(err)
+            function apply(p, cur, done) {
+                var keys = p.changes.map(function (c) { return c.key; });
+
+                if (!keys.length) return done(null);
+
+                store(STORE_BACKUP, { at: new Date().getTime(), url: baseUrl(), settings: cur, keys: keys });
+
+                save(p.next, keys, done);
+            }
+
+            // Возвращает настройки сервера, какими они были до подбора. done(err)
+            function rollback(done) {
+                var b = loadBackup();
+
+                if (!b) return done('Копии нет');
+
+                save(b.settings, b.keys || [], function (err) {
+                    if (!err) store(STORE_BACKUP, { at: 0, settings: null });
+
+                    done(err);
+                });
+            }
+
+            return {
+                TRACKERS_URL: TRACKERS_URL,
+                lineMbps: lineMbps,
+                plan: plan,
+                load: load,
+                apply: apply,
+                rollback: rollback,
+                hasBackup: hasBackup,
+                loadBackup: loadBackup,
+                baseUrl: baseUrl,
+                size: size
+            };
+        })();
+    });
+
     run('failover', function (LW) {
         'use strict';
 
@@ -1152,9 +2418,12 @@
 
         var S = LW.score;
         var SP = LW.speed;
+        var LL = LW.list;
 
         var STORE_WISHES = 'lw_wishes';
         var STORE_LINE = 'lw_line_peak';
+        var STORE_SORT = 'lw_sort';
+        var PAGE = 40; // сколько раздач показываем сразу, остальные по кнопке «Показать ещё»
         var CFG = window.lampa_watch_config || {}; // для тестов: сокращает паузы
         var PENDING_TTL = 110000; // дольше этого торрент не ждём: Лампа сама сдаётся через 90 секунд
         var MEASURE_MS = CFG.measureMs || 12000;
@@ -1165,6 +2434,7 @@
         var pending = null;       // запуск, начатый нами: ждём список файлов и нажимаем нужный
         var cancelMeasure = null; // остановить идущий замер
         var runId = 0;            // номер поиска: поздний ответ отменённого поиска игнорируется
+        var listModal = null;     // параметры открытого окна со списком: по ним его можно перерисовать на месте
 
         // ---------------------------------------------------------------- тексты и варианты
 
@@ -1172,13 +2442,35 @@
             button: 'Лучшая раздача',
             wishesTitle: 'Что хотим смотреть',
             go: 'Найти и смотреть',
-            showList: 'Показать список',
+            showList: 'Все раздачи',
+            standardList: 'Обычный список Лампы',
+            refine: 'Уточнить поиск',
+            refineTitle: 'Что искать',
+            listKicker: 'Все раздачи',
+            sortLabel: 'Сортировка',
+            sortTitle: 'Сортировка',
+            filters: 'Фильтры',
+            filtersTitle: 'Фильтры',
+            anyValue: 'Любое',
+            junk: 'Камрипы и чужие фильмы',
+            junkShown: 'Показаны',
+            junkHidden: 'Скрыты',
+            resetFilters: 'Сбросить фильтры',
+            more: 'Показать ещё',
+            emptyFilters: 'Под эти фильтры ничего нет. Сбросьте фильтры или поменяйте их.',
+            emptyJunk: 'Подходящих раздач нет. В фильтрах можно показать камрипы и чужие фильмы.',
+            legend: 'Цветная точка справа — прикидка по числу раздающих: зелёная пойдёт плавно, жёлтая на грани, оранжевая скорее будет лагать, красная не рекомендуется. Точнее покажет замер при запуске.',
+            viewed: 'Смотрели',
+            bestMark: 'Лучшая',
             searching: 'Ищу раздачи',
             searchingSub: 'Парсер собирает раздачи, потом я выберу лучшую',
             nothing: 'Ничего не нашлось',
+            parserSub: 'Парсер не отвечает или не настроен. Кнопка ниже сама проверит доступные парсеры и подберёт рабочие, потом поиск повторится.',
             nothingSub: 'Парсер ничего не вернул или все раздачи не подошли. Попробуйте поменять пожелания или откройте обычный список.',
             parserError: 'Парсер не ответил',
+            fixParser: 'Подобрать парсер',
             best: 'Лучшая раздача',
+            chosen: 'Выбранная раздача',
             launch: 'Запустить',
             others: 'Другие раздачи',
             changeWishes: 'Пожелания',
@@ -1339,8 +2631,10 @@
             };
         }
 
-        function searchObject(movie, season) {
+        function searchObject(movie, season, query) {
             var s = searchText(movie, season);
+
+            if (query) s = { search: query, search_one: query, search_two: query };
 
             return { url: '', title: L().Lang.translate('title_torrents'), component: 'torrents', search: s.search, search_one: s.search_one, search_two: s.search_two, movie: movie, page: 1 };
         }
@@ -1393,7 +2687,41 @@
                 '.lw-stats{opacity:.6;font-size:.9em;margin-top:.8em;line-height:1.5}',
                 '.lw-bar{height:.5em;border-radius:.25em;background:rgba(255,255,255,.12);overflow:hidden;margin:.9em 0}',
                 '.lw-bar i{display:block;height:100%;width:0;background:#2f6fe4;transition:width .4s}',
-                '.lw-live{font-size:1.1em;line-height:1.6}'
+                '.lw-live{font-size:1.1em;line-height:1.6}',
+                '.lw-cards{display:flex;flex-wrap:wrap;margin:.2em -.3em .5em}',
+                '.lw-card{flex:1 1 9em;margin:.3em;padding:.6em .9em;border-radius:.6em;background:rgba(255,255,255,.07)}',
+                '.lw-card b{display:block;font-size:1.7em;line-height:1.15;font-weight:600}',
+                '.lw-card span{opacity:.6;font-size:.85em}',
+                '.lw-qrow{display:flex;align-items:center;margin:.25em 0;font-size:.95em}',
+                '.lw-qrow__name{width:4.6em;opacity:.75}',
+                '.lw-qrow__bar{flex:1;height:.55em;border-radius:.3em;background:rgba(255,255,255,.1);overflow:hidden;margin:0 .8em}',
+                '.lw-qrow__bar i{display:block;height:100%;background:#2f6fe4}',
+                '.lw-qrow__n{width:2.4em;text-align:right;opacity:.75}',
+                '.lw-chips{margin:.5em 0 0;opacity:.85}',
+                '.lw-tools{display:flex;flex-wrap:wrap;margin:.6em -.25em .5em}',
+                '.lw-tool{margin:.25em;padding:.55em 1em;border-radius:.6em;background:rgba(255,255,255,.1)}',
+                '.lw-tool b{font-weight:600}',
+                '.lw-tool.focus{background:#fff;color:#000}',
+                '.lw-item{display:flex;align-items:center;padding:.7em 1em;margin-bottom:.35em;border-radius:.6em;background:rgba(255,255,255,.07)}',
+                '.lw-item.focus,.lw-more.focus{background:#fff;color:#000}',
+                '.lw-item__main{flex:1;min-width:0}',
+                '.lw-item__title{font-size:1.05em;line-height:1.3;word-break:break-word;margin-bottom:.4em}',
+                '.lw-item__side{margin-left:1.1em;text-align:right;white-space:nowrap;line-height:1.35}',
+                '.lw-item__side b{font-size:1.1em}',
+                '.lw-item__meta{opacity:.65;font-size:.85em}',
+                '.lw-item .lw-badge{margin-bottom:0;font-size:.85em}',
+                '.lw-item.focus .lw-badge{background:rgba(0,0,0,.12)}',
+                '.lw-item.focus .lw-badge--hot{background:#2f6fe4;color:#fff}',
+                '.lw-dot{flex:none;width:.8em;height:.8em;margin-left:1em;border-radius:50%}',
+                '.lw-dot--smooth{background:#6fcf97}',
+                '.lw-dot--edge{background:#f2c94c}',
+                '.lw-dot--lag{background:#f2994a}',
+                '.lw-dot--bad{background:#eb5757}',
+                '.lw-more{padding:.8em 1em;margin-bottom:.35em;border-radius:.6em;background:rgba(255,255,255,.07);text-align:center}',
+                '.lw-empty{padding:1.2em .4em;opacity:.7}',
+                '.lw-legend{margin-top:.8em;opacity:.5;font-size:.85em;line-height:1.4}',
+                // окно ввода Лампы по умолчанию лежит ниже окон (слой 21 против 50), и клавиатуры из «Уточнить поиск» было бы не видно
+                '.settings-input{z-index:60}'
             ].join('\n');
 
             var el = document.createElement('style');
@@ -1631,7 +2959,7 @@
                 html: box,
                 buttons: [
                     { name: TXT.go, onSelect: function () { closeModal(); findAndWatch(movie, w); } },
-                    { name: TXT.showList, onSelect: function () { saveWishes(w); openStandardList(movie, w.season); } }
+                    { name: TXT.showList, onSelect: function () { closeModal(); findAndWatch(movie, w, 'list'); } }
                 ],
                 onBack: function () { closeModal(); backToContent(); }
             });
@@ -1639,7 +2967,9 @@
 
         // ---------------------------------------------------------------- поиск
 
-        function findAndWatch(movie, w) {
+        // mode: 'best' (по умолчанию) показывает лучшую раздачу, 'list' открывает весь список. query: свой поисковый запрос.
+        // repaired: парсер в этом поиске уже подбирали заново, второй раз не пытаемся.
+        function findAndWatch(movie, w, mode, query, repaired) {
             var my = ++runId;
             var started = new Date().getTime();
 
@@ -1669,20 +2999,40 @@
                 if (my !== runId) return;
 
                 closeModal();
-                showNothing(movie, w, text);
+
+                // парсер молчит: подбираем другой сами и повторяем поиск; не вышло или выключено — даём кнопку
+                var again = function () { findAndWatch(movie, w, mode, query, true); };
+
+                if (!repaired && LW.setup && LW.setup.autoOn()) {
+                    LW.setup.repairParser(function (status) {
+                        if (my !== runId) return;
+
+                        if (status === 'applied') return again();
+                        if (status === 'cancel') return backToContent();
+
+                        showNothing(movie, w, text, mode, null, again);
+                    });
+
+                    return;
+                }
+
+                showNothing(movie, w, text, mode, null, LW.setup ? again : null);
             }
 
             try {
-                L().Parser.get(searchObject(movie, w.season), function (json) {
+                L().Parser.get(searchObject(movie, w.season, query), function (json) {
                     if (my !== runId) return;
 
                     var picked = S.pick((json && json.Results) || [], w, movie);
 
                     picked.seconds = Math.round((new Date().getTime() - started) / 1000);
+                    picked.query = query || '';
 
                     closeModal();
 
-                    if (!picked.best) return showNothing(movie, w, '');
+                    if (mode === 'list' && picked.ranked.length) return openList(movie, picked);
+
+                    if (!picked.best) return showNothing(movie, w, '', mode, picked);
 
                     if (w.instant) {
                         noty('Выбрано: ' + briefOf(picked.best));
@@ -1699,21 +3049,41 @@
             }
         }
 
-        function showNothing(movie, w, text) {
+        // retry: если задан, парсер не ответил, и первой кнопкой идёт «Подобрать парсер»
+        function showNothing(movie, w, text, mode, picked, retry) {
             var box = h('div', 'lw-box');
+            var buttons = [{ name: TXT.changeWishes, onSelect: function () { closeModal(); openWishes(movie); } }];
+
+            if (retry) {
+                buttons.unshift({ name: TXT.fixParser, onSelect: function () {
+                    closeModal();
+
+                    LW.setup.openParserSetup({ onDone: function (status) {
+                        if (status === 'applied') retry();
+                        else if (status === 'cancel' || status === 'none') backToContent();
+                        else showNothing(movie, w, text, mode, picked, retry);
+                    } });
+                } });
+            }
 
             box.append(h('div', 'lw-title', text || TXT.nothing));
-            box.append(h('div', 'lw-line', TXT.nothingSub));
+            box.append(h('div', 'lw-line', retry ? TXT.parserSub : TXT.nothingSub));
 
-            openModal({
-                title: '',
-                html: box,
-                buttons: [
-                    { name: TXT.changeWishes, onSelect: function () { closeModal(); openWishes(movie); } },
-                    { name: TXT.showList, onSelect: function () { openStandardList(movie, w.season); } }
-                ],
-                onBack: function () { closeModal(); backToContent(); }
-            });
+            buttons.push({ name: TXT.refine, onSelect: function () { refineSearch(movie, picked, w, mode); } });
+
+            // что-то нашлось, но всё отсеяно как мусор: даём посмотреть всё как есть
+            if (picked && picked.ranked.length) {
+                buttons.push({ name: TXT.showList + ' (' + picked.ranked.length + ')', onSelect: function () {
+                    picked.view = newView();
+                    picked.view.junk = true;
+                    closeModal();
+                    openList(movie, picked);
+                } });
+            }
+
+            buttons.push({ name: TXT.standardList, onSelect: function () { openStandardList(movie, w.season); } });
+
+            openModal({ title: '', html: box, buttons: buttons, onBack: function () { closeModal(); backToContent(); } });
         }
 
         // ---------------------------------------------------------------- результат
@@ -1722,7 +3092,7 @@
             var box = h('div', 'lw-box');
             var badges = h('div', 'lw-badges');
 
-            box.append(h('div', 'lw-kicker', TXT.best));
+            box.append(h('div', 'lw-kicker', entry === picked.best ? TXT.best : TXT.chosen));
             box.append(h('div', 'lw-title', shortText(entry.item.Title, 140)));
 
             badgesOf(entry).forEach(function (b) { badges.append(h('span', 'lw-badge' + (b.hot ? ' lw-badge--hot' : ''), b.t)); });
@@ -1745,9 +3115,15 @@
             if (picked.playable.length > 1) buttons.push({ name: TXT.others, onSelect: function () { showOthers(movie, picked, entry); } });
 
             buttons.push({ name: TXT.changeWishes, onSelect: function () { closeModal(); openWishes(movie); } });
-            buttons.push({ name: TXT.showList, onSelect: function () { openStandardList(movie, picked.wishes.season); } });
+            buttons.push({ name: TXT.showList, onSelect: function () { closeModal(); openList(movie, picked); } });
 
-            openModal({ title: '', html: box, buttons: buttons, onBack: function () { closeModal(); backToContent(); } });
+            openModal({ title: '', html: box, buttons: buttons, onBack: function () {
+                closeModal();
+
+                // пришли из списка: Назад возвращает в него, на то же место
+                if (picked.listOpen) openList(movie, picked);
+                else backToContent();
+            } });
         }
 
         function showOthers(movie, picked, current) {
@@ -1762,6 +3138,351 @@
                 items: items,
                 onSelect: function (a) { closeModal(); showResult(movie, picked, a.entry); },
                 onBack: function () { L().Controller.toggle('modal'); }
+            });
+        }
+
+        // ---------------------------------------------------------------- список раздач
+
+        function loadSort() {
+            var v = '';
+
+            try { v = L().Storage.get(STORE_SORT, '') || ''; } catch (e) {}
+
+            return LL.SORTS.some(function (x) { return x[0] === v; }) ? v : 'best';
+        }
+
+        function saveSort(v) {
+            try { L().Storage.set(STORE_SORT, v); } catch (e) {}
+        }
+
+        // Состояние списка живёт в самом результате поиска: после просмотра раздачи список открывается там же, где был
+        function newView() {
+            return { sort: loadSort(), filters: {}, junk: false, limit: PAGE, focus: null };
+        }
+
+        function gbText(n) {
+            return (n >= 10 ? n.toFixed(0) : n.toFixed(1)).replace('.', ',');
+        }
+
+        function statCard(value, label) {
+            var card = h('div', 'lw-card');
+
+            card.append(h('b', '', String(value)));
+            card.append(h('span', '', label));
+
+            return card;
+        }
+
+        function listStats(shown, base, total) {
+            var s = LL.summary(shown);
+            var box = h('div', 'lw-statblock');
+            var cards = h('div', 'lw-cards');
+
+            cards.append(statCard(shown.length, 'показано из ' + base.length));
+            cards.append(statCard(s.smooth, 'потянут по прикидке'));
+            cards.append(statCard(s.maxSeeds, 'раздающих максимум, медиана ' + s.medianSeeds));
+            cards.append(statCard(s.maxGb ? gbText(s.minGb) + '–' + gbText(s.maxGb) : '—', 'ГБ, разброс размеров'));
+            box.append(cards);
+
+            var top = 0;
+
+            s.quality.forEach(function (q) { if (q.count > top) top = q.count; });
+
+            s.quality.forEach(function (q) {
+                var row = h('div', 'lw-qrow');
+                var bar = h('div', 'lw-qrow__bar');
+
+                bar.append($('<i></i>').css('width', Math.max(4, Math.round(q.count / top * 100)) + '%'));
+
+                row.append(h('div', 'lw-qrow__name', LL.valueLabel('quality', q.value)));
+                row.append(bar);
+                row.append(h('div', 'lw-qrow__n', String(q.count)));
+                box.append(row);
+            });
+
+            var chips = [];
+
+            if (s.hdr) chips.push('HDR ' + s.hdr);
+            if (s.dv) chips.push('Dolby Vision ' + s.dv);
+            if (s.dub) chips.push('Дубляж ' + s.dub);
+            if (s.mvo) chips.push('Многоголосая ' + s.mvo);
+            if (s.subs) chips.push('Субтитры ' + s.subs);
+            if (s.viewed) chips.push(TXT.viewed + ' ' + s.viewed);
+
+            s.trackers.slice(0, 4).forEach(function (t) { chips.push(t.value + ' ' + t.count); });
+
+            if (total > base.length) chips.push('скрыто как мусор ' + (total - base.length));
+
+            if (chips.length) box.append(h('div', 'lw-chips', chips.join(' · ')));
+
+            return box;
+        }
+
+        function listRow(movie, picked, entry, index) {
+            var row = h('div', 'lw-item selector');
+            var main = h('div', 'lw-item__main');
+            var side = h('div', 'lw-item__side');
+            var badges = h('div', 'lw-item__badges');
+            var v = VERDICT[entry.forecast.level] || VERDICT.unknown;
+            var date = LL.dateLabel(entry);
+
+            main.append(h('div', 'lw-item__title', shortText(entry.item.Title, 110)));
+
+            if (entry === picked.best) badges.append(h('span', 'lw-badge lw-badge--hot', TXT.bestMark));
+
+            badgesOf(entry).slice(0, 7).forEach(function (b) { badges.append(h('span', 'lw-badge' + (b.hot ? ' lw-badge--hot' : ''), b.t)); });
+
+            if (entry.item.viewed) badges.append(h('span', 'lw-badge', TXT.viewed));
+
+            main.append(badges);
+
+            side.append(h('b', '', S.formatSize(entry.item.Size) || '?'));
+            side.append(h('div', '', '↑' + entry.seeds));
+            side.append(h('div', 'lw-item__meta', (entry.item.Tracker || '?') + (date ? ' · ' + date : '')));
+
+            row.append(main);
+            row.append(side);
+            row.append(h('div', 'lw-dot lw-dot--' + v.cls).attr('title', v.head));
+
+            row.on('hover:enter', function () {
+                picked.view.focus = { type: 'row', index: index };
+                listModal = null;
+
+                closeModal();
+                showResult(movie, picked, entry);
+            });
+
+            return row;
+        }
+
+        function listTool(label, value, onEnter) {
+            var el = h('div', 'lw-tool selector');
+
+            el.append(document.createTextNode(label));
+
+            if (value) el.append(h('b', '', value));
+
+            el.on('hover:enter', onEnter);
+
+            return el;
+        }
+
+        function buildList(movie, picked) {
+            var view = picked.view;
+            var base = LL.visible(picked.ranked, view.junk);
+            var shown = LL.sort(LL.filter(base, view.filters), view.sort);
+            var root = h('div', 'lw-box lw-list');
+            var tools = h('div', 'lw-tools');
+            var rows = [];
+            var sortBtn;
+            var filterBtn;
+            var active = LL.activeCount(view.filters);
+            var focus = null;
+
+            root.append(h('div', 'lw-kicker', TXT.listKicker + (picked.query ? ' · «' + shortText(picked.query, 40) + '»' : '')));
+            root.append(h('div', 'lw-title', shortText(movie.title || movie.name || '', 90)));
+            root.append(listStats(shown, base, picked.ranked.length));
+
+            sortBtn = listTool(TXT.sortLabel + ': ', LL.sortName(view.sort), function () { pickSort(movie, picked); });
+            filterBtn = listTool(TXT.filters, active ? ' · ' + active : '', function () { pickFilters(movie, picked); });
+
+            tools.append(sortBtn);
+            tools.append(filterBtn);
+            tools.append(listTool(TXT.refine, '', function () { refineSearch(movie, picked, picked.wishes, 'list'); }));
+            tools.append(listTool(TXT.standardList, '', function () { listModal = null; picked.listOpen = false; openStandardList(movie, picked.wishes.season); }));
+            root.append(tools);
+
+            shown.slice(0, view.limit).forEach(function (entry, i) {
+                var row = listRow(movie, picked, entry, i);
+
+                rows.push(row);
+                root.append(row);
+            });
+
+            if (shown.length > view.limit) {
+                var more = h('div', 'lw-more selector', TXT.more + ' (' + (shown.length - view.limit) + ')');
+
+                more.on('hover:enter', function () {
+                    view.focus = { type: 'row', index: view.limit };
+                    view.limit += PAGE;
+                    redrawList(movie, picked);
+                });
+
+                root.append(more);
+            }
+
+            if (!shown.length) root.append(h('div', 'lw-empty', shown.length === 0 && !base.length ? TXT.emptyJunk : TXT.emptyFilters));
+
+            if (shown.length) root.append(h('div', 'lw-legend', TXT.legend));
+
+            var f = view.focus;
+
+            if (f && f.type === 'tool') focus = f.name === 'filter' ? filterBtn : sortBtn;
+            else if (f && f.type === 'row') focus = rows[f.index] || rows[rows.length - 1] || null;
+            // по умолчанию фокус на первой кнопке: если сразу встать на раздачу, шапка со статистикой уедет за край
+
+            return { root: root, focus: focus ? focus[0] : undefined };
+        }
+
+        // Фокус на панели кнопок: Лампа прокрутила бы окно к ней и спрятала шапку со статистикой, поэтому возвращаем наверх
+        function showListTop(view) {
+            if (view.focus && view.focus.type === 'row') return;
+
+            try { L().Modal.scroll().reset(); } catch (e) {}
+        }
+
+        function openList(movie, picked) {
+            if (!picked.view) picked.view = newView();
+
+            picked.listOpen = true;
+
+            var built = buildList(movie, picked);
+            var params = {
+                title: '',
+                html: built.root,
+                size: 'large',
+                scroll_to_center: true,
+                select: built.focus,
+                onBack: function () {
+                    listModal = null;
+                    picked.listOpen = false;
+
+                    closeModal();
+                    backToContent();
+                }
+            };
+
+            listModal = params;
+            openModal(params);
+            showListTop(picked.view);
+        }
+
+        // Перерисовывает список в том же окне (Modal.update). В старой Лампе без него окно создаётся заново.
+        function redrawList(movie, picked) {
+            var Modal = L().Modal;
+
+            if (listModal && Modal && Modal.update) {
+                try {
+                    var built = buildList(movie, picked);
+
+                    listModal.select = built.focus;
+                    Modal.update(built.root);
+                    showListTop(picked.view);
+
+                    return;
+                } catch (e) {
+                    log('Modal.update: ' + e);
+                }
+            }
+
+            listModal = null;
+            closeModal();
+            openList(movie, picked);
+        }
+
+        function pickSort(movie, picked) {
+            var view = picked.view;
+
+            L().Select.show({
+                title: TXT.sortTitle,
+                items: LL.SORTS.map(function (x) { return { title: x[1], key: x[0], selected: x[0] === view.sort }; }),
+                onSelect: function (a) {
+                    view.sort = a.key;
+                    view.focus = { type: 'tool', name: 'sort' };
+                    saveSort(a.key);
+                    redrawList(movie, picked);
+                },
+                onBack: function () { L().Controller.toggle('modal'); }
+            });
+        }
+
+        function pickFilters(movie, picked) {
+            var view = picked.view;
+            var facets = LL.facets(LL.visible(picked.ranked, view.junk));
+            var items = [];
+
+            LL.FILTERS.forEach(function (key) {
+                var current = view.filters[key];
+
+                // фильтр с одним вариантом ничего не отсеивает: не загромождаем меню
+                if (facets[key].length < 2 && !current) return;
+
+                items.push({ title: LL.KEY_LABEL[key], subtitle: current ? LL.valueLabel(key, current, LANG_NAME) : TXT.anyValue, key: key });
+            });
+
+            items.push({ title: TXT.junk, subtitle: view.junk ? TXT.junkShown : TXT.junkHidden, key: '_junk' });
+
+            if (LL.activeCount(view.filters)) items.push({ title: TXT.resetFilters, key: '_reset' });
+
+            L().Select.show({
+                title: TXT.filtersTitle,
+                items: items,
+                onSelect: function (a) {
+                    view.focus = { type: 'tool', name: 'filter' };
+                    view.limit = PAGE;
+
+                    if (a.key === '_junk') {
+                        view.junk = !view.junk;
+                        redrawList(movie, picked);
+                    } else if (a.key === '_reset') {
+                        view.filters = {};
+                        redrawList(movie, picked);
+                    } else {
+                        pickFilterValue(movie, picked, a.key, facets[a.key]);
+                    }
+                },
+                onBack: function () { L().Controller.toggle('modal'); }
+            });
+        }
+
+        function pickFilterValue(movie, picked, key, values) {
+            var view = picked.view;
+            var current = view.filters[key];
+            var items = [{ title: TXT.anyValue, value: '', selected: !current }];
+
+            values.forEach(function (v) {
+                items.push({ title: LL.valueLabel(key, v.value, LANG_NAME) + ' · ' + v.count, value: v.value, selected: current === v.value });
+            });
+
+            L().Select.show({
+                title: LL.KEY_LABEL[key],
+                items: items,
+                onSelect: function (a) {
+                    if (a.value) view.filters[key] = a.value;
+                    else delete view.filters[key];
+
+                    view.focus = { type: 'tool', name: 'filter' };
+                    redrawList(movie, picked);
+                },
+                onBack: function () { L().Controller.toggle('modal'); }
+            });
+        }
+
+        // Свой поисковый запрос, как «Уточнить» в обычном списке Лампы
+        function refineSearch(movie, picked, w, mode) {
+            var Input = L().Input;
+
+            if (!Input || !Input.edit) {
+                noty('В этой версии Лампы нет ввода текста');
+                return;
+            }
+
+            var current = (picked && picked.query) || searchText(movie, w.season).search;
+
+            Input.edit({ free: true, title: TXT.refineTitle, nosave: true, value: current }, function (value) {
+                value = ((value || '') + '').replace(/^\s+|\s+$/g, '');
+
+                if (!value) {
+                    try { L().Controller.toggle('modal'); } catch (e) {}
+                    return;
+                }
+
+                listModal = null;
+
+                if (picked) picked.listOpen = false;
+
+                closeModal();
+                findAndWatch(movie, w, mode, value);
             });
         }
 
@@ -2033,7 +3754,659 @@
             if (e.type === 'ready') start();
         });
 
+        LW.ui = { h: h, openModal: openModal, closeModal: closeModal, noty: noty, shortText: shortText, log: log };
         LW.watch = { start: start, openWishes: openWishes, addButton: addButton };
+    });
+
+    run('setup', function (LW) {
+        'use strict';
+
+        /*
+         * Окна и пункты настроек для автоподбора парсера (LW.parser).
+         *
+         * Настройки → Lampa Watch: кнопка «Подобрать парсер», «Откатить», переключатель автопочинки.
+         * Если парсер не ответил при поиске раздачи, watch.js сам зовёт LW.setup.repairParser().
+         * Все окна рассчитаны на пульт.
+         */
+        if (!LW.ui || !LW.parser) return;
+
+        var U = LW.ui;
+        var P = LW.parser;
+        var T = LW.tune;
+
+        var AUTO_KEY = 'lw_parser_auto';
+
+        var TXT = {
+            component: 'Lampa Watch',
+            parserTitle: 'Парсер',
+            pick: 'Подобрать парсер',
+            pickDescr: 'Проверит парсеры и трекеры, выберет самые быстрые и полные и сам впишет их в настройки.',
+            now: 'Сейчас',
+            rollback: 'Откатить настройки парсера',
+            rollbackNone: 'Копии нет: подбор ещё не менял настройки',
+            rollbackDone: 'Настройки парсера возвращены',
+            rollbackNothing: 'Откатывать нечего',
+            copyFrom: 'Копия от',
+            auto: 'Чинить парсер автоматически',
+            autoDescr: 'Если парсер не отвечает при поиске раздачи, плагин сам подберёт другой и повторит поиск.',
+            searching: 'Подбираю парсер',
+            searchingAuto: 'Парсер не отвечает, подбираю другой',
+            searchingSub: 'Проверяю, какие парсеры отвечают на этом устройстве, и сравниваю их по тестовому запросу',
+            waiting: 'ждёт',
+            checking: 'проверяю…',
+            cancel: 'Отмена',
+            close: 'Закрыть',
+            again: 'Повторить',
+            apply: 'Применить',
+            found: 'Парсер подобран',
+            foundKicker: 'Лучший вариант',
+            keep: 'Менять ничего не нужно',
+            keepSub: 'Текущий парсер уже работает не хуже остальных.',
+            none: 'Рабочий парсер не найден',
+            noneSub: 'Ни один из проверенных не ответил. Что можно сделать:',
+            tips: [
+                'Проверьте, что на устройстве есть интернет.',
+                'Если у вас свой Jackett или Prowlarr, проверьте, что он запущен и доступен из этой сети.',
+                'Если запущен TorrServer, его встроенный поиск тоже проверяется, но для него нужен адрес TorrServer в настройках.'
+            ],
+            changes: 'Что изменится',
+            checked: 'Проверено',
+            mainOne: 'основной',
+            mainTwo: 'второй',
+            noAnswer: 'нет ответа',
+            changed: 'Парсер переключён',
+            changedHint: 'Вернуть прежние настройки можно в Настройки → Lampa Watch.',
+            applied: 'Парсер настроен',
+            seconds: 'с',
+            items: 'раздач',
+            trackers: 'трекеров',
+            score: 'оценка',
+
+            tuneTitle: 'TorrServer',
+            tunePick: 'Настроить TorrServer',
+            tunePickDescr: 'Прочитает настройки сервера и предложит изменения, которые ускоряют старт и добавляют источников.',
+            tuneRollback: 'Откатить настройки TorrServer',
+            tuneRollbackNone: 'Копии нет: настройка ещё не меняла сервер',
+            tuneRollbackDone: 'Настройки TorrServer возвращены',
+            tuneReading: 'Читаю настройки TorrServer',
+            tuneReadingSub: 'Смотрю, что стоит на сервере',
+            tuneWriting: 'Применяю настройки',
+            tuneWritingSub: 'Сервер перезапускает торрент-клиент, это займёт пару секунд',
+            tuneErrTitle: 'Не удалось настроить TorrServer',
+            tuneKicker: 'Настройка TorrServer',
+            tuneNoChanges: 'Сервер уже настроен хорошо',
+            tuneNoChangesSub: 'Менять нечего: то, что ускоряет старт и добавляет источников, у вас уже включено.',
+            tuneKeptCopy: 'Копия прежних настроек сохранена: вернуть их можно в Настройки → Lampa Watch → «Откатить настройки TorrServer».',
+            tuneWarn: 'Применение перезапускает торрент-клиент TorrServer: идущая раздача прервётся. Прежние настройки сохранятся, вернуть их можно в Настройки → Lampa Watch → «Откатить настройки TorrServer».',
+            tuneDone: 'TorrServer настроен',
+            tuneNotes: 'К сведению',
+            server: 'Сервер'
+        };
+
+        var KEY_NAME = {
+            parser_torrent_type: 'Тип парсера',
+            parser_use: 'Использовать парсер',
+            parser_use_link: 'Какие ссылки',
+            jackett_url: 'Jackett: ссылка', jackett_key: 'Jackett: ключ',
+            jackett_url_two: 'Jackett: вторая ссылка', jackett_key_two: 'Jackett: ключ второй',
+            prowlarr_url: 'Prowlarr: ссылка', prowlarr_key: 'Prowlarr: ключ',
+            prowlarr_url_two: 'Prowlarr: вторая ссылка', prowlarr_key_two: 'Prowlarr: ключ второй',
+            torrserver_search_type: 'Поиск TorrServer'
+        };
+
+        var VALUE_NAME = {
+            parser_torrent_type: { jackett: 'Jackett', prowlarr: 'Prowlarr', torrserver: 'TorrServer' },
+            parser_use_link: { one: 'только основная', two: 'только вторая', both: 'обе сразу' },
+            parser_use: { 'true': 'да', 'false': 'нет' },
+            torrserver_search_type: { rutor: 'Rutor', torznab: 'Torznab', both: 'оба' }
+        };
+
+        var runToken = 0;
+
+        // ---------------------------------------------------------------- оформление
+
+        function addStyle() {
+            if (document.getElementById('lw-setup-style')) return;
+
+            var css = [
+                '.lw-prow{display:flex;align-items:center;padding:.55em .9em;margin-bottom:.3em;border-radius:.55em;background:rgba(255,255,255,.07)}',
+                '.lw-prow__dot{flex:none;width:.75em;height:.75em;margin-right:.85em;border-radius:50%;background:rgba(255,255,255,.3)}',
+                '.lw-prow--run .lw-prow__dot{background:#f2c94c}',
+                '.lw-prow--ok .lw-prow__dot{background:#6fcf97}',
+                '.lw-prow--bad .lw-prow__dot{background:#eb5757}',
+                '.lw-prow--best{box-shadow:inset 0 0 0 .14em #2f6fe4}',
+                '.lw-prow__name{flex:1;min-width:0;word-break:break-all}',
+                '.lw-prow__tag{display:inline-block;margin-left:.6em;padding:.05em .5em;border-radius:.35em;background:#2f6fe4;font-size:.75em}',
+                '.lw-prow__info{margin-left:1em;opacity:.7;font-size:.9em;text-align:right}',
+                '.lw-chg{display:flex;justify-content:space-between;padding:.35em 0;border-bottom:1px solid rgba(255,255,255,.08)}',
+                '.lw-chg__k{opacity:.7}',
+                '.lw-chg__v{text-align:right;word-break:break-all;margin-left:1em}',
+                '.lw-chg__v s{opacity:.5;margin-right:.5em}',
+                '.lw-h{margin:1em 0 .4em;opacity:.55;font-size:.85em;letter-spacing:.06em;text-transform:uppercase}',
+                '.lw-tc{padding:.6em .9em;margin-bottom:.35em;border-radius:.55em;background:rgba(255,255,255,.07)}',
+                '.lw-tc__top{display:flex;justify-content:space-between;align-items:baseline}',
+                '.lw-tc__name{font-weight:600}',
+                '.lw-tc__val{text-align:right;margin-left:1em}',
+                '.lw-tc__val s{opacity:.5;margin-right:.5em}',
+                '.lw-tc__why{opacity:.65;font-size:.9em;margin-top:.25em;line-height:1.35}'
+            ].join('\n');
+
+            var el = document.createElement('style');
+
+            el.id = 'lw-setup-style';
+            el.appendChild(document.createTextNode(css));
+            document.head.appendChild(el);
+        }
+
+        // ---------------------------------------------------------------- вспомогательное
+
+        function autoOn() {
+            try {
+                var v = window.Lampa.Storage.get(AUTO_KEY, true);
+
+                return !(v === false || v === 'false');
+            } catch (e) {
+                return true;
+            }
+        }
+
+        function secs(ms) {
+            return (Math.round(ms / 100) / 10).toFixed(1);
+        }
+
+        // 1 раздача, 2 раздачи, 5 раздач
+        function plural(n, one, few, many) {
+            var a = Math.abs(n) % 100;
+            var b = a % 10;
+
+            if (a > 10 && a < 20) return many;
+            if (b > 1 && b < 5) return few;
+
+            return b === 1 ? one : many;
+        }
+
+        function shown(key, v) {
+            var map = VALUE_NAME[key];
+            var s = v === undefined || v === null ? '' : String(v);
+
+            if (/_key/.test(key)) return s ? '••••' : 'пусто';
+            if (map && map[s]) return map[s];
+
+            return s || 'пусто';
+        }
+
+        function when(ts) {
+            var d = new Date(ts);
+            var p = function (n) { return (n < 10 ? '0' : '') + n; };
+
+            return p(d.getDate()) + '.' + p(d.getMonth() + 1) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+        }
+
+        function infoOf(res) {
+            if (!res.ok) return res.error || TXT.noAnswer;
+            if (res.rating < 15) return secs(res.ms) + ' ' + TXT.seconds + ' · пусто по тестовому запросу';
+
+            return secs(res.ms) + ' ' + TXT.seconds + ' · ' + res.ev.relevant + ' ' + plural(res.ev.relevant, 'раздача', 'раздачи', 'раздач') + ' · ' + res.ev.trackers.length + ' ' + plural(res.ev.trackers.length, 'трекер', 'трекера', 'трекеров') + ' · ' + TXT.score + ' ' + res.rating;
+        }
+
+        function nameOf(c) {
+            return (P.TYPE_NAME[c.type] && c.type !== 'torrserver' ? P.TYPE_NAME[c.type] + ' · ' : '') + P.labelOf(c);
+        }
+
+        function resultRows(out, plan) {
+            var box = $('<div></div>');
+
+            out.results.forEach(function (r) {
+                var tag = '';
+                var row = U.h('div', 'lw-prow lw-prow--' + (r.ok && r.rating >= 15 ? 'ok' : 'bad'));
+                var name = U.h('div', 'lw-prow__name', nameOf(r.cand));
+
+                if (plan && plan.primary === r) tag = TXT.mainOne;
+                else if (plan && plan.secondary === r) tag = TXT.mainTwo;
+
+                if (tag) {
+                    row.addClass('lw-prow--best');
+                    name.append(U.h('span', 'lw-prow__tag', tag));
+                }
+
+                row.append(U.h('div', 'lw-prow__dot'));
+                row.append(name);
+                row.append(U.h('div', 'lw-prow__info', infoOf(r)));
+                box.append(row);
+            });
+
+            return box;
+        }
+
+        // ---------------------------------------------------------------- окно проверки
+
+        // opts: { auto: true — сразу применить найденное, back: имя контроллера, куда вернуть фокус по окончании
+        // (Лампа сама его не возвращает, если окно открыто не поверх другого окна), onDone(status) — 'applied' | 'kept' | 'none' | 'cancel' }
+        function openParserSetup(opts) {
+            opts = opts || {};
+
+            var mine = ++runToken;
+            var box = U.h('div', 'lw-box');
+            var bar = $('<div class="lw-bar"><i style="width:3%"></i></div>');
+            var list = U.h('div', 'lw-list');
+            var rows = {};
+            var doneCalled = false;
+
+            function finish(status) {
+                if (doneCalled) return;
+
+                doneCalled = true;
+
+                if (opts.back) {
+                    try { window.Lampa.Controller.toggle(opts.back); } catch (e) {}
+                }
+
+                if (opts.onDone) opts.onDone(status);
+            }
+
+            function cancelIt() {
+                runToken++;
+
+                try { P.cancel(); } catch (e) {}
+
+                U.closeModal();
+                finish('cancel');
+            }
+
+            box.append(U.h('div', 'lw-title', opts.auto ? TXT.searchingAuto : TXT.searching));
+            box.append(U.h('div', 'lw-line', TXT.searchingSub));
+            box.append(bar);
+            box.append(list);
+
+            U.openModal({ title: '', html: box, size: 'large', buttons: [{ name: TXT.cancel, onSelect: cancelIt }], onBack: cancelIt });
+
+            function setRow(c, cls, info) {
+                var r = rows[c.id];
+
+                if (!r) return;
+
+                r.row.removeClass('lw-prow--run lw-prow--ok lw-prow--bad').addClass(cls);
+                r.info.text(info);
+            }
+
+            P.run({
+                onList: function (cands) {
+                    cands.forEach(function (c) {
+                        var row = U.h('div', 'lw-prow');
+                        var info = U.h('div', 'lw-prow__info', TXT.waiting);
+
+                        row.append(U.h('div', 'lw-prow__dot'));
+                        row.append(U.h('div', 'lw-prow__name', nameOf(c)));
+                        row.append(info);
+                        list.append(row);
+
+                        rows[c.id] = { row: row, info: info };
+                    });
+                },
+                onStart: function (c) { setRow(c, 'lw-prow--run', TXT.checking); },
+                onResult: function (res, n, total) {
+                    setRow(res.cand, res.ok && res.rating >= 15 ? 'lw-prow--ok' : 'lw-prow--bad', infoOf(res));
+                    bar.find('i').css('width', Math.max(3, Math.round(100 * n / total)) + '%');
+                }
+            }, function (out) {
+                if (mine !== runToken) return;
+
+                U.closeModal();
+
+                if (!out.plan) return showNone(out, opts, finish);
+                if (opts.auto) return autoApply(out, finish);
+
+                showFound(out, opts, finish);
+            });
+        }
+
+        function autoApply(out, finish) {
+            var changes = P.apply(out.plan);
+
+            if (!changes.length) return finish('kept');
+
+            U.noty(TXT.changed + ': ' + P.describe(out.plan));
+            U.noty(TXT.changedHint);
+            refreshSettings();
+            finish('applied');
+        }
+
+        function showNone(out, opts, finish) {
+            var box = U.h('div', 'lw-box');
+            var tips = $('<ul class="lw-tips"></ul>');
+
+            box.append(U.h('div', 'lw-title', TXT.none));
+            box.append(U.h('div', 'lw-line', TXT.noneSub));
+
+            TXT.tips.forEach(function (t) { tips.append(U.h('li', '', t)); });
+            box.append(tips);
+
+            box.append(U.h('div', 'lw-h', TXT.checked + ': ' + out.results.length));
+            box.append(resultRows(out, null));
+
+            function again() {
+                U.closeModal();
+                openParserSetup(opts);
+            }
+
+            function close() {
+                U.closeModal();
+                finish('none');
+            }
+
+            U.openModal({ title: '', html: box, size: 'large', buttons: [{ name: TXT.again, onSelect: again }, { name: TXT.close, onSelect: close }], onBack: close });
+        }
+
+        function changesBlock(plan) {
+            var box = $('<div></div>');
+
+            box.append(U.h('div', 'lw-h', TXT.changes));
+
+            plan.changes.forEach(function (c) {
+                var v = U.h('div', 'lw-chg__v');
+
+                if (String(c.from) !== '' ) v.append($('<s></s>').text(shown(c.key, c.from)));
+
+                v.append(document.createTextNode(shown(c.key, c.to)));
+
+                box.append($('<div class="lw-chg"></div>').append(U.h('div', 'lw-chg__k', KEY_NAME[c.key] || c.key)).append(v));
+            });
+
+            return box;
+        }
+
+        function showFound(out, opts, finish) {
+            var plan = out.plan;
+            var box = U.h('div', 'lw-box');
+            var badges = U.h('div', 'lw-badges');
+            var p = plan.primary;
+            var buttons = [];
+
+            box.append(U.h('div', 'lw-kicker', plan.changed ? TXT.foundKicker : TXT.keep));
+            box.append(U.h('div', 'lw-title', P.describe(plan)));
+
+            if (plan.type !== 'torrserver') {
+                badges.append(U.h('span', 'lw-badge lw-badge--hot', secs(p.ms) + ' ' + TXT.seconds));
+                badges.append(U.h('span', 'lw-badge', p.ev.relevant + ' ' + plural(p.ev.relevant, 'раздача', 'раздачи', 'раздач')));
+                badges.append(U.h('span', 'lw-badge', p.ev.trackers.length + ' ' + plural(p.ev.trackers.length, 'трекер', 'трекера', 'трекеров')));
+                box.append(badges);
+                box.append(U.h('div', 'lw-line', p.ev.trackers.join(', ')));
+            }
+
+            if (!plan.changed) box.append(U.h('div', 'lw-note', TXT.keepSub));
+            else box.append(changesBlock(plan));
+
+            box.append(U.h('div', 'lw-h', TXT.checked + ': ' + out.results.length));
+            box.append(resultRows(out, plan));
+
+            function close() {
+                U.closeModal();
+                finish(plan.changed ? 'cancel' : 'kept');
+            }
+
+            if (plan.changed) {
+                buttons.push({ name: TXT.apply, onSelect: function () {
+                    P.apply(plan);
+                    U.closeModal();
+                    U.noty(TXT.applied + ': ' + P.describe(plan));
+                    refreshSettings();
+                    finish('applied');
+                } });
+            }
+
+            buttons.push({ name: TXT.close, onSelect: close });
+
+            U.openModal({ title: '', html: box, size: 'large', buttons: buttons, onBack: close });
+        }
+
+        // Для watch.js: парсер не ответил при поиске. Подбираем другой молча (кроме окна хода проверки).
+        function repairParser(done) {
+            openParserSetup({ auto: true, onDone: done });
+        }
+
+        // ---------------------------------------------------------------- окна настройки TorrServer
+
+        var tuneToken = 0;
+
+        function busyModal(title, sub, onCancel) {
+            var box = U.h('div', 'lw-box');
+
+            box.append(U.h('div', 'lw-title', title));
+            box.append(U.h('div', 'lw-line', sub));
+            box.append($('<div class="lw-bar"><i style="width:60%"></i></div>'));
+
+            // пока идёт запись на сервер, закрывать окно нельзя: оборвём на середине
+            U.openModal({ title: '', html: box, size: 'small', buttons: onCancel ? [{ name: TXT.cancel, onSelect: onCancel }] : [], onBack: onCancel || function () {} });
+        }
+
+        function tuneChangesBlock(plan) {
+            var box = $('<div></div>');
+
+            plan.changes.forEach(function (c) {
+                var val = U.h('div', 'lw-tc__val');
+
+                val.append($('<s></s>').text(c.fromText));
+                val.append(document.createTextNode(c.toText));
+
+                box.append($('<div class="lw-tc"></div>')
+                    .append($('<div class="lw-tc__top"></div>').append(U.h('div', 'lw-tc__name', c.label)).append(val))
+                    .append(U.h('div', 'lw-tc__why', c.why)));
+            });
+
+            return box;
+        }
+
+        // opts: { back: контроллер для возврата фокуса, onDone(status) — 'applied' | 'kept' | 'error' | 'cancel' }
+        function openTune(opts) {
+            opts = opts || {};
+
+            var mine = ++tuneToken;
+            var doneCalled = false;
+
+            function finish(status) {
+                if (doneCalled) return;
+
+                doneCalled = true;
+
+                if (opts.back) {
+                    try { window.Lampa.Controller.toggle(opts.back); } catch (e) {}
+                }
+
+                if (opts.onDone) opts.onDone(status);
+            }
+
+            function cancelIt() {
+                tuneToken++;
+                U.closeModal();
+                finish('cancel');
+            }
+
+            function showError(err, written) {
+                var box = U.h('div', 'lw-box');
+
+                box.append(U.h('div', 'lw-title', TXT.tuneErrTitle));
+                box.append(U.h('div', 'lw-line', err));
+
+                if (written && T.hasBackup()) box.append(U.h('div', 'lw-note', TXT.tuneKeptCopy));
+
+                function close() {
+                    U.closeModal();
+                    finish('error');
+                }
+
+                U.openModal({ title: '', html: box, buttons: [{ name: TXT.again, onSelect: function () { U.closeModal(); openTune(opts); } }, { name: TXT.close, onSelect: close }], onBack: close });
+            }
+
+            function showPlan(cur, plan) {
+                var box = U.h('div', 'lw-box');
+                var n = plan.changes.length;
+                var buttons = [];
+
+                function close() {
+                    U.closeModal();
+                    finish(n ? 'cancel' : 'kept');
+                }
+
+                box.append(U.h('div', 'lw-kicker', TXT.tuneKicker));
+                box.append(U.h('div', 'lw-title', n ? 'Предлагаю ' + n + ' ' + plural(n, 'изменение', 'изменения', 'изменений') : TXT.tuneNoChanges));
+                box.append(U.h('div', 'lw-line', TXT.server + ': ' + P.hostOf(T.baseUrl())));
+
+                if (n) box.append(tuneChangesBlock(plan));
+                else box.append(U.h('div', 'lw-note', TXT.tuneNoChangesSub));
+
+                if (plan.notes.length) {
+                    box.append(U.h('div', 'lw-h', TXT.tuneNotes));
+                    plan.notes.forEach(function (t) { box.append(U.h('div', 'lw-note', t)); });
+                }
+
+                if (n) {
+                    box.append(U.h('div', 'lw-stats', TXT.tuneWarn));
+
+                    buttons.push({ name: TXT.apply, onSelect: function () {
+                        U.closeModal();
+                        busyModal(TXT.tuneWriting, TXT.tuneWritingSub);
+
+                        T.apply(plan, cur, function (err) {
+                            if (mine !== tuneToken) return;
+
+                            U.closeModal();
+
+                            if (err) return showError(err, true);
+
+                            U.noty(TXT.tuneDone + ': ' + n + ' ' + plural(n, 'изменение', 'изменения', 'изменений'));
+                            refreshSettings();
+                            finish('applied');
+                        });
+                    } });
+                }
+
+                buttons.push({ name: TXT.close, onSelect: close });
+
+                U.openModal({ title: '', html: box, size: 'large', buttons: buttons, onBack: close });
+            }
+
+            busyModal(TXT.tuneReading, TXT.tuneReadingSub, cancelIt);
+
+            T.load(function (err, cur) {
+                if (mine !== tuneToken) return;
+
+                U.closeModal();
+
+                if (err) return showError(err);
+
+                showPlan(cur, T.plan(cur, { line: T.lineMbps() }));
+            });
+        }
+
+        function doTuneRollback() {
+            if (!T.hasBackup()) return U.noty(TXT.rollbackNothing);
+
+            U.noty(TXT.tuneWriting + '…');
+
+            T.rollback(function (err) {
+                U.noty(err ? TXT.tuneErrTitle + ': ' + err : TXT.tuneRollbackDone);
+                refreshSettings();
+            });
+        }
+
+        // ---------------------------------------------------------------- настройки Лампы
+
+        var settingItems = {};
+
+        function refreshSettings() {
+            var b = P.loadBackup();
+
+            if (settingItems.pick) settingItems.pick.find('.settings-param__descr').text(TXT.now + ': ' + P.currentLabel());
+            if (settingItems.rollback) settingItems.rollback.find('.settings-param__descr').text(b ? TXT.copyFrom + ' ' + when(b.at) + ' (' + (b.summary || '') + ')' : TXT.rollbackNone);
+
+            if (T) {
+                var tb = T.loadBackup();
+                var addr = T.baseUrl();
+
+                if (settingItems.tune) settingItems.tune.find('.settings-param__descr').text(TXT.tunePickDescr + (addr ? ' ' + TXT.server + ': ' + P.hostOf(addr) + '.' : ''));
+                if (settingItems.tuneRollback) settingItems.tuneRollback.find('.settings-param__descr').text(tb ? TXT.copyFrom + ' ' + when(tb.at) : TXT.tuneRollbackNone);
+            }
+        }
+
+        function doRollback() {
+            if (!P.hasBackup()) return U.noty(TXT.rollbackNothing);
+
+            P.rollback();
+            U.noty(TXT.rollbackDone);
+            refreshSettings();
+        }
+
+        function addSettings() {
+            var api = window.Lampa.SettingsApi;
+
+            if (!api) return;
+
+            api.addComponent({
+                component: 'lampa_watch',
+                name: TXT.component,
+                icon: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8.5 11.2l1.8 1.8 3.4-3.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+            });
+
+            api.addParam({ component: 'lampa_watch', param: { name: 'lw_parser_title', type: 'title' }, field: { name: TXT.parserTitle } });
+
+            api.addParam({
+                component: 'lampa_watch',
+                param: { name: 'lw_parser_pick', type: 'button' },
+                field: { name: TXT.pick, description: TXT.pickDescr },
+                onRender: function (item) { settingItems.pick = item; refreshSettings(); },
+                onChange: function () { openParserSetup({ back: 'settings_component', onDone: function () { refreshSettings(); } }); }
+            });
+
+            api.addParam({
+                component: 'lampa_watch',
+                param: { name: 'lw_parser_rollback', type: 'button' },
+                field: { name: TXT.rollback, description: TXT.rollbackNone },
+                onRender: function (item) { settingItems.rollback = item; refreshSettings(); },
+                onChange: doRollback
+            });
+
+            api.addParam({
+                component: 'lampa_watch',
+                param: { name: AUTO_KEY, type: 'trigger', default: true },
+                field: { name: TXT.auto, description: TXT.autoDescr }
+            });
+
+            if (!T) return;
+
+            api.addParam({ component: 'lampa_watch', param: { name: 'lw_tune_title', type: 'title' }, field: { name: TXT.tuneTitle } });
+
+            api.addParam({
+                component: 'lampa_watch',
+                param: { name: 'lw_tune_pick', type: 'button' },
+                field: { name: TXT.tunePick, description: TXT.tunePickDescr },
+                onRender: function (item) { settingItems.tune = item; refreshSettings(); },
+                onChange: function () { openTune({ back: 'settings_component', onDone: function () { refreshSettings(); } }); }
+            });
+
+            api.addParam({
+                component: 'lampa_watch',
+                param: { name: 'lw_tune_rollback', type: 'button' },
+                field: { name: TXT.tuneRollback, description: TXT.tuneRollbackNone },
+                onRender: function (item) { settingItems.tuneRollback = item; refreshSettings(); },
+                onChange: doTuneRollback
+            });
+        }
+
+        function start() {
+            try {
+                addStyle();
+                addSettings();
+            } catch (e) {
+                if (window.console) console.log('[lampa-watch] настройки: ' + e);
+            }
+        }
+
+        if (window.appready) start();
+        else window.Lampa.Listener.follow('app', function (e) {
+            if (e.type === 'ready') start();
+        });
+
+        LW.setup = { openParserSetup: openParserSetup, repairParser: repairParser, openTune: openTune, autoOn: autoOn, start: start };
     });
 
 })();

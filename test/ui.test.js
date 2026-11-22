@@ -47,8 +47,8 @@ function makeEnv(opts) {
 
     win.$ = win.jQuery = $;
 
-    const calls = { noty: [], parser: [], torrent: [], played: [], back: 0, stat: [], selects: [], activity: [], toggles: [] };
-    const store = {};
+    const calls = { noty: [], parser: [], torrent: [], played: [], back: 0, stat: [], selects: [], activity: [], toggles: [], updates: 0, inputs: [], native: [], settings: { components: [], params: [] } };
+    const store = Object.assign({}, opts.store);
     const listeners = {};
     const modals = [];
 
@@ -74,9 +74,15 @@ function makeEnv(opts) {
             $('body').append(el);
             modals.push({ params, el });
         },
+        update(html) {
+            calls.updates++;
+            modals[modals.length - 1].el.find('.modal__body').empty().append(html);
+        },
         close() { modals.pop().el.remove(); },
         opened: () => modals.length > 0
     };
+
+    if (opts.noUpdate) delete Modal.update; // старая Лампа без Modal.update
 
     const parserFn = opts.parser || ((obj, ok) => ok({ Results: FIGHT }));
 
@@ -93,6 +99,11 @@ function makeEnv(opts) {
         Activity: { push: (o) => calls.activity.push(o) },
         Controller: { toggle: (n) => calls.toggles.push(n), back: () => { calls.back++; } },
         Select: { show: (p) => calls.selects.push(p) },
+        SettingsApi: {
+            addComponent: (c) => calls.settings.components.push(c),
+            addParam: (p) => calls.settings.params.push(p)
+        },
+        Input: opts.noInput ? undefined : { edit: (p, cb) => { calls.inputs.push(p); calls.inputCb = cb; } },
         Parser: {
             get: (obj, ok, fail) => { calls.parser.push(obj); setTimeout(() => parserFn(obj, ok, fail), 2); },
             clear: () => { calls.parserCleared = true; }
@@ -100,7 +111,32 @@ function makeEnv(opts) {
         Reguest: function () {
             this.timeout = () => {};
             this.clear = () => {};
-            this.silent = (url, ok, fail) => {
+            // нативный запрос: так парсер проверяют и Лампа, и плагин; ответы задаёт opts.net(url) (нет ответа = ошибка)
+            this.native = (url, ok, fail) => {
+                calls.native.push(url);
+                setTimeout(() => {
+                    const r = opts.net ? opts.net(url) : null;
+
+                    if (r) ok(r); else fail();
+                }, 2);
+            };
+            this.silent = (url, ok, fail, body, params) => {
+                if (/parsers\.json/.test(url)) return setTimeout(fail, 2); // список с сайта плагина в тестах недоступен
+
+                // настройки TorrServer: opts.server — его состояние, при записи заменяется целиком, как у настоящего
+                if (/\/settings$/.test(url)) {
+                    return setTimeout(() => {
+                        const req = JSON.parse(body);
+
+                        if (opts.serverDown || !opts.server) return fail();
+                        if (req.action === 'get') return ok(JSON.parse(JSON.stringify(opts.server)));
+
+                        Object.keys(req.sets).forEach((k) => { opts.server[k] = req.sets[k]; });
+
+                        if (params && params.dataType === 'text') ok(''); else fail();
+                    }, 2);
+                }
+
                 calls.stat.push(url);
                 setTimeout(() => {
                     const stat = opts.stat ? opts.stat(url) : { download_speed: 8e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: 1, preload_size: 1e9 };
@@ -136,10 +172,10 @@ function makeEnv(opts) {
     win.Lampa = Lampa;
     win.appready = true;
     win.lampa_settings = opts.settings || { torrents_use: true };
-    win.lampa_watch_config = { measureMs: 150, warmup: 20, interval: 15, settle: 5 };
+    win.lampa_watch_config = { measureMs: 150, warmup: 20, interval: 15, settle: 5, verifyDelay: 5, tuneMs: 400 };
 
     // Модули собираются так же, как в build.js
-    const parts = opts.bundle ? [fs.readFileSync(BUNDLE, 'utf8')] : ['speed', 'score', 'watch'].map((name) =>
+    const parts = opts.bundle ? [fs.readFileSync(BUNDLE, 'utf8')] : ['speed', 'score', 'list', 'parser', 'tune', 'watch', 'setup'].map((name) =>
         'var LW = window.__LW = window.__LW || {};\n(function (LW) {\n\'use strict\';\n' + fs.readFileSync(path.join(SRC, name + '.js'), 'utf8') + '\n})(LW);');
 
     parts.forEach((code) => win.eval(code));
@@ -479,25 +515,26 @@ async function test(name, fn) {
         assert.ok(!env.text().includes('Проверяю скорость'));
     });
 
-    await test('ничего не нашлось: окно с предложением поменять пожелания или открыть список', async () => {
+    await test('ничего не нашлось: окно с предложением поменять пожелания, уточнить поиск или открыть список', async () => {
         const env = makeEnv({ parser: (o, ok) => ok({ Results: [FIGHT[3]] }) }); // только CAM
         env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
         env.press('Найти и смотреть');
 
         await waitFor(() => env.text().indexOf('Ничего не нашлось') >= 0);
-        assert.ok(env.text().indexOf('Пожелания') >= 0 && env.text().indexOf('Показать список') >= 0);
-        env.press('Показать список');
+        assert.ok(env.text().indexOf('Пожелания') >= 0 && env.text().indexOf('Обычный список Лампы') >= 0 && env.text().indexOf('Уточнить поиск') >= 0);
+        env.press('Обычный список Лампы');
         assert.strictEqual(env.calls.activity[0].component, 'torrents');
         assert.strictEqual(env.calls.activity[0].movie, MOVIE);
     });
 
     await test('парсер вернул ошибку: понятное сообщение, а не тишина', async () => {
-        const env = makeEnv({ parser: (o, ok, fail) => fail('Не задана ссылка: Jackett') });
+        const env = makeEnv({ parser: (o, ok, fail) => fail('Не задана ссылка: Jackett'), store: { lw_parser_auto: false } });
         env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
         env.press('Найти и смотреть');
 
         await waitFor(() => env.text().indexOf('Парсер не ответил') >= 0);
         assert.ok(env.text().indexOf('Не задана ссылка: Jackett') >= 0);
+        assert.ok(env.top().el.find('.modal__button').first().text() === 'Подобрать парсер', 'первой кнопкой идёт «Подобрать парсер»');
     });
 
     await test('отмена поиска: поздний ответ парсера ничего не открывает', async () => {
@@ -538,6 +575,519 @@ async function test(name, fn) {
 
         const env = makeEnv({ bundle: true }); // у макета нет Torserver и SettingsApi: failover упадёт
         assert.strictEqual(env.card(MOVIE).find('.lw-watch-btn').length, 1);
+    });
+
+
+    // ----------------------------------------------------------- экран «Все раздачи»
+    const MANY = (n) => Array.from({ length: n }, (x, i) => R('Fight Club (1999) BDRip 1080p AVC Rus #' + i, 8 + i * 0.1, 30 + i));
+    const rowsOf = (env) => env.top().el.find('.lw-item');
+    const toolOf = (env, label) => env.top().el.find('.lw-tool').filter((i, t) => env.$(t).text().indexOf(label) >= 0).first();
+    const openList = async (env, movie) => {
+        env.card(movie || MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Все раздачи');
+        await waitFor(() => env.top().el.find('.lw-list').length === 1, 1500, 'список раздач');
+    };
+    const pickItem = (env, n, title) => {
+        const sel = env.calls.selects[env.calls.selects.length - 1];
+        const item = sel.items.filter((x) => x.title.indexOf(title) === 0)[0];
+        if (!item) throw new Error('нет пункта «' + title + '», есть: ' + sel.items.map((x) => x.title).join(' | '));
+        sel.onSelect(item);
+    };
+
+    await test('список: кнопка «Все раздачи» в пожеланиях ищет и открывает список со статистикой', async () => {
+        const env = makeEnv();
+        await openList(env);
+        assert.strictEqual(rowsOf(env).length, 3); // камрип скрыт как мусор
+        const text = env.text();
+        assert.ok(text.indexOf('показано из 3') >= 0, text);
+        assert.ok(text.indexOf('скрыто как мусор 1') >= 0);
+        assert.ok(env.top().el.find('.lw-qrow').length >= 2); // полоски по качеству
+        assert.ok(env.top().el.find('.lw-card').length === 4);
+        assert.ok(env.top().el.find('.lw-badge--hot').filter((i, b) => env.$(b).text() === 'Лучшая').length === 1);
+        assert.strictEqual(env.top().params.size, 'large');
+        assert.strictEqual(env.calls.parser.length, 1);
+    });
+
+    await test('список: сортировка меняет порядок в том же окне и запоминается', async () => {
+        const env = makeEnv();
+        await openList(env);
+        const modalsBefore = env.modals.length;
+
+        toolOf(env, 'Сортировка').trigger('hover:enter');
+        const sel = env.calls.selects[0];
+        assert.strictEqual(sel.items.length, 7);
+        assert.ok(sel.items.some((x) => x.title === 'По дате') && sel.items.some((x) => x.title === 'Просмотренные'));
+
+        pickItem(env, 0, 'По раздающим');
+        assert.strictEqual(env.modals.length, modalsBefore); // не открылось второе окно
+        assert.strictEqual(env.calls.updates, 1);
+        assert.ok(rowsOf(env).first().text().indexOf('BDRip') >= 0); // у раздачи 1080p больше всего раздающих (150)
+        assert.strictEqual(env.store.lw_sort, 'seeds');
+        assert.strictEqual(env.top().params.select, toolOf(env, 'Сортировка').get(0)); // фокус остался на кнопке
+
+        pickItem(env, 0, 'По размеру');
+        assert.ok(rowsOf(env).first().text().indexOf('Remux') >= 0 || rowsOf(env).first().text().indexOf('58') >= 0);
+        assert.ok(toolOf(env, 'Сортировка').text().indexOf('По размеру') >= 0);
+    });
+
+    await test('список: сохранённая сортировка применяется при следующем открытии', async () => {
+        const env = makeEnv();
+        env.store.lw_sort = 'size';
+        await openList(env);
+        assert.ok(toolOf(env, 'Сортировка').text().indexOf('По размеру') >= 0);
+        env.store.lw_sort = 'что-то левое';
+        const env2 = makeEnv();
+        env2.store.lw_sort = 'что-то левое';
+        await openList(env2);
+        assert.ok(toolOf(env2, 'Сортировка').text().indexOf('Лучшие по пожеланиям') >= 0);
+    });
+
+    await test('список: фильтр по качеству, счётчик на кнопке, сброс и показ мусора', async () => {
+        const env = makeEnv();
+        await openList(env);
+
+        toolOf(env, 'Фильтры').trigger('hover:enter');
+        const menu = env.calls.selects[0];
+        const names = menu.items.map((x) => x.title);
+        assert.ok(names.indexOf('Качество') >= 0 && names.indexOf('HDR') >= 0 && names.indexOf('Камрипы и чужие фильмы') >= 0);
+        assert.ok(names.indexOf('Год') < 0); // у всех раздач один год: фильтр ничего не даст, в меню его нет
+        assert.ok(names.indexOf('Сбросить фильтры') < 0); // пока ничего не выбрано
+
+        pickItem(env, 0, 'Качество');
+        const values = env.calls.selects[1].items.map((x) => x.title);
+        assert.strictEqual(values[0], 'Любое');
+        assert.ok(values.indexOf('4K · 2') >= 0 && values.indexOf('1080p · 1') >= 0, values.join('|'));
+
+        pickItem(env, 1, '4K');
+        assert.strictEqual(rowsOf(env).length, 2);
+        assert.ok(toolOf(env, 'Фильтры').text().indexOf('· 1') >= 0);
+        assert.strictEqual(env.top().params.select, toolOf(env, 'Фильтры').get(0));
+
+        // второй фильтр сверху: HDR + 1080p ничего не даёт
+        toolOf(env, 'Фильтры').trigger('hover:enter');
+        pickItem(env, 2, 'Качество');
+        pickItem(env, 3, '1080p');
+        assert.strictEqual(rowsOf(env).length, 1);
+
+        toolOf(env, 'Фильтры').trigger('hover:enter');
+        assert.ok(env.calls.selects[4].items.some((x) => x.title === 'Сбросить фильтры'));
+        pickItem(env, 4, 'Сбросить фильтры');
+        assert.strictEqual(rowsOf(env).length, 3);
+        assert.ok(toolOf(env, 'Фильтры').text().indexOf('·') < 0);
+
+        toolOf(env, 'Фильтры').trigger('hover:enter');
+        pickItem(env, 5, 'Камрипы и чужие фильмы');
+        assert.strictEqual(rowsOf(env).length, 4);
+        assert.ok(env.text().indexOf('скрыто как мусор') < 0);
+    });
+
+    await test('список: если под фильтры ничего нет, так и написано', async () => {
+        const env = makeEnv();
+        await openList(env);
+        toolOf(env, 'Фильтры').trigger('hover:enter');
+        pickItem(env, 0, 'HDR');
+        pickItem(env, 1, 'Нет'); // без HDR остаётся только 1080p
+        assert.strictEqual(rowsOf(env).length, 1);
+        toolOf(env, 'Фильтры').trigger('hover:enter');
+        pickItem(env, 2, 'Качество');
+        pickItem(env, 3, '4K');
+        assert.strictEqual(rowsOf(env).length, 0);
+        assert.ok(env.top().el.find('.lw-empty').text().indexOf('ничего нет') >= 0);
+        assert.strictEqual(env.top().el.find('.lw-tool').length, 4); // кнопки на месте, можно сбросить
+    });
+
+    await test('список: OK по раздаче открывает карточку, Назад возвращает на ту же строку', async () => {
+        const env = makeEnv();
+        await openList(env);
+        const second = rowsOf(env).eq(1);
+        const title = second.find('.lw-item__title').text();
+
+        second.trigger('hover:enter');
+        assert.ok(env.text().indexOf('Выбранная раздача') >= 0 && env.text().indexOf('Лучшая раздача') < 0 && env.text().indexOf(title.slice(0, 30)) >= 0, env.text());
+        assert.strictEqual(env.modals.length, 1); // список закрыт, а не лежит под карточкой
+        assert.ok(env.text().indexOf('Все раздачи') >= 0); // кнопка вернуться к списку
+
+        env.top().params.onBack(); // Назад на пульте
+        await waitFor(() => env.top().el.find('.lw-list').length === 1);
+        assert.strictEqual(env.top().params.select, rowsOf(env).get(1));
+        assert.strictEqual(env.modals.length, 1);
+
+        // у лучшей раздачи подпись «Лучшая раздача»; «Все раздачи» из карточки возвращает в список
+        rowsOf(env).eq(0).trigger('hover:enter');
+        assert.ok(env.text().indexOf('Лучшая раздача') >= 0);
+        env.press('Все раздачи');
+        assert.ok(env.top().el.find('.lw-list').length === 1);
+    });
+
+    await test('список: из списка можно запустить раздачу и она запускается', async () => {
+        const env = makeEnv();
+        await openList(env);
+        rowsOf(env).eq(0).trigger('hover:enter');
+        env.press('Запустить');
+        await waitFor(() => env.calls.torrent.length === 1, 1500, 'Torrent.start');
+    });
+
+    await test('список: больше 40 раздач показываются порциями по кнопке «Показать ещё»', async () => {
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: MANY(65) }) });
+        await openList(env);
+        assert.strictEqual(rowsOf(env).length, 40);
+        const more = env.top().el.find('.lw-more');
+        assert.ok(more.text().indexOf('Показать ещё (25)') >= 0, more.text());
+
+        more.trigger('hover:enter');
+        assert.strictEqual(rowsOf(env).length, 65);
+        assert.strictEqual(env.top().el.find('.lw-more').length, 0);
+        assert.strictEqual(env.top().params.select, rowsOf(env).get(40)); // фокус на первой новой строке
+    });
+
+    await test('список: «Уточнить поиск» спрашивает запрос и ищет заново', async () => {
+        const env = makeEnv();
+        await openList(env);
+        toolOf(env, 'Уточнить поиск').trigger('hover:enter');
+
+        const ask = env.calls.inputs[0];
+        assert.strictEqual(ask.free, true);
+        assert.ok(ask.value.indexOf('Fight Club') >= 0);
+
+        env.calls.inputCb('  Fight Club 2160p  ');
+        await waitFor(() => env.calls.parser.length === 2 && env.top().el.find('.lw-list').length === 1);
+        assert.strictEqual(env.calls.parser[1].search, 'Fight Club 2160p');
+        assert.strictEqual(env.calls.parser[1].search_one, 'Fight Club 2160p');
+        assert.ok(env.text().indexOf('Fight Club 2160p') >= 0); // запрос виден в шапке списка
+
+        // следующее уточнение начинается с прошлого запроса
+        toolOf(env, 'Уточнить поиск').trigger('hover:enter');
+        assert.strictEqual(env.calls.inputs[1].value, 'Fight Club 2160p');
+
+        // пустой ввод ничего не ломает: список на месте, поиск не запускался
+        env.calls.inputCb('   ');
+        assert.strictEqual(env.calls.parser.length, 2);
+        assert.strictEqual(env.top().el.find('.lw-list').length, 1);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'modal');
+    });
+
+    await test('список: без ввода текста в Лампе «Уточнить поиск» сообщает об этом', async () => {
+        const env = makeEnv({ noInput: true });
+        await openList(env);
+        toolOf(env, 'Уточнить поиск').trigger('hover:enter');
+        assert.ok(env.calls.noty.some((t) => t.indexOf('нет ввода текста') >= 0));
+        assert.strictEqual(env.top().el.find('.lw-list').length, 1);
+    });
+
+    await test('список: в Лампе без Modal.update окно пересоздаётся, а не дублируется', async () => {
+        const env = makeEnv({ noUpdate: true });
+        await openList(env);
+        toolOf(env, 'Сортировка').trigger('hover:enter');
+        pickItem(env, 0, 'По раздающим');
+        assert.strictEqual(env.modals.length, 1);
+        assert.strictEqual(env.calls.updates, 0);
+        assert.ok(toolOf(env, 'Сортировка').text().indexOf('По раздающим') >= 0);
+        assert.ok(rowsOf(env).first().text().indexOf('BDRip') >= 0);
+    });
+
+    await test('список: «Обычный список Лампы» открывает штатный экран торрентов', async () => {
+        const env = makeEnv();
+        await openList(env);
+        toolOf(env, 'Обычный список Лампы').trigger('hover:enter');
+        assert.strictEqual(env.calls.activity[0].component, 'torrents');
+        assert.strictEqual(env.modals.length, 0);
+    });
+
+    await test('список: Назад из списка закрывает его и возвращает на карточку', async () => {
+        const env = makeEnv();
+        await openList(env);
+        env.top().params.onBack();
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'content');
+    });
+
+    await test('список: если раздач нет совсем, сообщение «ничего не нашлось», а не пустой список', async () => {
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: [] }) });
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Все раздачи');
+        await waitFor(() => env.text().indexOf('Ничего не нашлось') >= 0);
+        assert.ok(env.text().indexOf('Все раздачи (') < 0);
+        assert.ok(env.text().indexOf('Уточнить поиск') >= 0);
+    });
+
+    await test('ничего подходящего, но раздачи есть: можно открыть «Все раздачи» с мусором и уточнить поиск', async () => {
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: [FIGHT[3]] }) }); // только камрип
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Ничего не нашлось') >= 0);
+        assert.ok(env.text().indexOf('Все раздачи (1)') >= 0);
+
+        env.press('Все раздачи (1)');
+        assert.strictEqual(env.top().el.find('.lw-list').length, 1);
+        assert.strictEqual(rowsOf(env).length, 1); // мусор показан, потому что больше ничего нет
+        assert.strictEqual(env.modals.length, 1);
+    });
+
+    await test('уточнить поиск из окна «ничего не нашлось» запускает поиск по своему запросу', async () => {
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: o.search === 'Fight Club 1999' ? FIGHT.slice(0, 3) : [] }) });
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Ничего не нашлось') >= 0);
+        env.press('Уточнить поиск');
+        env.calls.inputCb('Fight Club 1999');
+        await waitFor(() => env.text().indexOf('Запустить') >= 0, 1500, 'карточка лучшей раздачи');
+        assert.strictEqual(env.calls.parser[1].search, 'Fight Club 1999');
+    });
+
+    await test('карточка лучшей раздачи: «Назад» без списка возвращает на карточку фильма', async () => {
+        const env = makeEnv();
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Запустить') >= 0);
+        env.top().params.onBack();
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'content');
+    });
+
+
+    // ----------------------------------------------------------- автоподбор парсера
+    const TRACKERS = ['rutracker', 'kinozal', 'rutor', 'nnmclub', 'bitru', 'megapeer', 'toloka', 'mazepa'];
+    const jackettJson = (trackers, n) => ({ Results: Array.from({ length: n }, (x, i) => ({ Title: 'Бойцовский клуб / Fight Club (1999) BDRip 1080p #' + i, Tracker: trackers[i % trackers.length], Seeders: 10 + i, Size: 1e10 })) });
+    // живы только два публичных парсера, ваш http://mine:9117 молчит
+    const goodNet = (url) => url.indexOf('https://jac.red/api/v2.0') === 0 ? jackettJson(TRACKERS, 40) : url.indexOf('https://jr.maxvol.pro/api/v2.0') === 0 ? jackettJson(TRACKERS.slice(2), 30) : null;
+    const MINE = { parser_torrent_type: 'jackett', jackett_url: 'http://mine:9117', parser_use_link: 'one' };
+    const param = (env, name) => env.calls.settings.params.filter((p) => p.param.name === name)[0];
+    const startSearch = (env) => {
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+    };
+
+    await test('настройки: раздел Lampa Watch, кнопки подбора и отката, переключатель автопочинки', async () => {
+        const env = makeEnv({ store: MINE });
+        const comp = env.calls.settings.components[0];
+
+        assert.strictEqual(comp.component, 'lampa_watch');
+        assert.deepStrictEqual(env.calls.settings.params.map((p) => p.param.name), ['lw_parser_title', 'lw_parser_pick', 'lw_parser_rollback', 'lw_parser_auto', 'lw_tune_title', 'lw_tune_pick', 'lw_tune_rollback']);
+        assert.strictEqual(param(env, 'lw_parser_pick').param.type, 'button');
+        assert.strictEqual(param(env, 'lw_parser_auto').param.type, 'trigger');
+        assert.strictEqual(param(env, 'lw_parser_auto').param.default, true);
+
+        const item = env.$('<div><div class="settings-param__descr"></div></div>');
+
+        param(env, 'lw_parser_pick').onRender(item);
+        assert.strictEqual(item.find('.settings-param__descr').text(), 'Сейчас: Jackett: mine:9117');
+
+        const back = env.$('<div><div class="settings-param__descr"></div></div>');
+
+        param(env, 'lw_parser_rollback').onRender(back);
+        assert.ok(back.find('.settings-param__descr').text().indexOf('Копии нет') === 0);
+    });
+
+    await test('парсер не отвечает: плагин сам подбирает другой, записывает его и повторяет поиск', async () => {
+        let env;
+
+        env = makeEnv({ store: MINE, net: goodNet, parser: (o, ok, fail) => (env.store.jackett_url === 'https://jac.red' ? ok({ Results: FIGHT }) : fail('Парсер не отвечает (http://mine:9117)')) });
+        startSearch(env);
+
+        await waitFor(() => env.text().indexOf('подбираю другой') >= 0, 1500, 'окно подбора');
+
+        await waitFor(() => env.text().indexOf('Запустить') >= 0, 3000, 'карточка лучшей раздачи после повтора');
+
+        assert.strictEqual(env.store.jackett_url, 'https://jac.red');
+        assert.deepStrictEqual(env.calls.native.map((u) => u.split('/api')[0]).sort(), ['http://mine:9117', 'https://jac.red', 'https://jr.maxvol.pro'], 'проверены ваш и два публичных');
+        assert.strictEqual(env.calls.parser.length, 2, 'поиск повторён один раз');
+        assert.ok(env.calls.noty.some((t) => t.indexOf('Парсер переключён') === 0), env.calls.noty.join(' | '));
+        assert.strictEqual(env.store.lw_parser_backup.values.jackett_url, 'http://mine:9117');
+        assert.strictEqual(env.store.parser_use, 'true');
+    });
+
+    await test('автопочинка выключена: кнопка «Подобрать парсер» показывает проверку и результат, «Применить» повторяет поиск', async () => {
+        let env;
+
+        env = makeEnv({ store: Object.assign({ lw_parser_auto: false }, MINE), net: goodNet, parser: (o, ok, fail) => (env.store.jackett_url === 'https://jac.red' ? ok({ Results: FIGHT }) : fail('нет связи')) });
+        startSearch(env);
+
+        await waitFor(() => env.text().indexOf('нет связи') >= 0);
+        assert.strictEqual(env.calls.native.length, 0, 'без разрешения ничего не проверяем');
+
+        env.press('Подобрать парсер');
+        await waitFor(() => env.text().indexOf('Применить') >= 0, 3000, 'результат проверки');
+
+        const text = env.text();
+
+        assert.ok(text.indexOf('Лучший вариант') >= 0 && text.indexOf('jac.red') >= 0 && text.indexOf('Что изменится') >= 0);
+        assert.ok(text.indexOf('8 трекеров') >= 0, 'плашки: ' + text.slice(0, 200));
+        assert.ok(env.top().el.find('.lw-prow--best').length >= 1);
+        assert.ok(env.top().el.find('.lw-prow--bad').length >= 1, 'ваш парсер отмечен как не ответивший');
+        assert.strictEqual(env.store.jackett_url, 'http://mine:9117', 'до «Применить» настройки целы');
+
+        env.press('Применить');
+        await waitFor(() => env.text().indexOf('Запустить') >= 0, 3000, 'карточка после повтора');
+        assert.strictEqual(env.store.jackett_url, 'https://jac.red');
+        assert.strictEqual(env.calls.parser.length, 2);
+    });
+
+    await test('парсер не нашёлся: советы, «Повторить» проверяет снова, «Закрыть» возвращает к кнопке подбора', async () => {
+        const env = makeEnv({ store: MINE, net: () => null, parser: (o, ok, fail) => fail('нет связи') });
+        startSearch(env);
+
+        await waitFor(() => env.text().indexOf('Рабочий парсер не найден') >= 0, 3000, 'окно «не найден»');
+        assert.ok(env.text().indexOf('Проверьте, что на устройстве есть интернет') >= 0);
+        assert.ok(env.top().el.find('.lw-prow--bad').length >= 3);
+
+        const before = env.calls.native.length;
+
+        env.press('Повторить');
+        await waitFor(() => env.text().indexOf('Рабочий парсер не найден') >= 0 && env.calls.native.length > before, 3000, 'повторная проверка');
+
+        env.press('Закрыть');
+        assert.ok(env.text().indexOf('Парсер не ответил') >= 0 && env.text().indexOf('нет связи') >= 0);
+        assert.strictEqual(env.top().el.find('.modal__button').first().text(), 'Подобрать парсер');
+        assert.strictEqual(env.calls.parser.length, 1, 'без рабочего парсера повторного поиска нет');
+    });
+
+    await test('отмена подбора: окно закрывается, фокус возвращается на карточку, поздние ответы молчат', async () => {
+        const env = makeEnv({ store: MINE, net: goodNet, parser: (o, ok, fail) => fail('нет связи') });
+        startSearch(env);
+
+        await waitFor(() => env.text().indexOf('подбираю другой') >= 0);
+        env.top().params.onBack();
+
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'content');
+
+        await sleep(150);
+        assert.strictEqual(env.modals.length, 0, 'поздние ответы ничего не открыли');
+        assert.strictEqual(env.store.jackett_url, 'http://mine:9117');
+    });
+
+    await test('из настроек: подбор, «Применить», потом «Откатить» возвращает прежние значения', async () => {
+        const env = makeEnv({ store: Object.assign({ parser_use: true }, MINE), net: goodNet });
+        const done = [];
+
+        param(env, 'lw_parser_pick').onChange();
+        await waitFor(() => env.text().indexOf('Применить') >= 0, 3000, 'результат проверки');
+        env.press('Применить');
+
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.store.jackett_url, 'https://jac.red');
+        assert.ok(env.calls.noty.some((t) => t.indexOf('Парсер настроен') === 0));
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'settings_component', 'фокус вернулся в настройки');
+
+        const back = env.$('<div><div class="settings-param__descr"></div></div>');
+
+        param(env, 'lw_parser_rollback').onRender(back);
+        assert.ok(back.find('.settings-param__descr').text().indexOf('Копия от') === 0, back.text());
+
+        param(env, 'lw_parser_rollback').onChange();
+        assert.strictEqual(env.store.jackett_url, 'http://mine:9117');
+        assert.ok(env.calls.noty.indexOf('Настройки парсера возвращены') >= 0);
+
+        param(env, 'lw_parser_rollback').onChange();
+        assert.ok(env.calls.noty.indexOf('Откатывать нечего') >= 0);
+    });
+
+    await test('из настроек: если текущий парсер уже лучший, окно так и говорит и ничего не предлагает менять', async () => {
+        const env = makeEnv({
+            store: { parser_torrent_type: 'jackett', jackett_url: 'https://jac.red', parser_use_link: 'one', parser_use: true },
+            net: (url) => (url.indexOf('https://jac.red/api/v2.0') === 0 ? jackettJson(TRACKERS, 40) : null)
+        });
+
+        param(env, 'lw_parser_pick').onChange();
+        await waitFor(() => env.text().indexOf('Менять ничего не нужно') >= 0, 3000, 'окно «менять не нужно»');
+        assert.ok(env.top().el.find('.modal__button').filter((i, b) => env.$(b).text() === 'Применить').length === 0);
+        env.press('Закрыть');
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'settings_component');
+        assert.ok(!env.store.lw_parser_backup, 'копия отката не создаётся без изменений');
+    });
+
+
+    // ----------------------------------------------------------- автонастройка TorrServer
+    const TS_REAL = () => ({
+        CacheSize: 6442450944, ReaderReadAHead: 95, PreloadCache: 20, UseDisk: false, RetrackersMode: 2, TrackersListURL: '', EnableRutorSearch: false,
+        EnableTorznabSearch: false, DisableTCP: false, DisableUTP: false, DisableDHT: false, DisablePEX: false, DownloadRateLimit: 0, ConnectionsLimit: 150,
+        TMDBSettings: { APIKey: '' }
+    });
+    const TS_STORE = { torrserver_url: 'http://ts:8090' };
+
+    await test('настройка TorrServer: сервер читается, изменения объяснены, «Применить» пишет их, «Откатить» возвращает', async () => {
+        const server = TS_REAL();
+        const env = makeEnv({ store: TS_STORE, server });
+
+        param(env, 'lw_tune_pick').onChange();
+        await waitFor(() => env.text().indexOf('Предлагаю') >= 0, 2000, 'предложение изменений');
+
+        const text = env.text();
+
+        assert.ok(text.indexOf('Предлагаю 4 изменения') >= 0, text.slice(0, 120));
+        ['Встроенный поиск Rutor', 'Трекеры в раздачах', 'Список открытых трекеров', 'Предзагрузка перед стартом'].forEach((n) => assert.ok(text.indexOf(n) >= 0, n));
+        assert.ok(text.indexOf('удалять трекеры раздачи') >= 0 && text.indexOf('добавлять открытые трекеры') >= 0);
+        assert.ok(text.indexOf('перезапускает торрент-клиент') >= 0 && text.indexOf('6 ГБ') >= 0);
+        assert.strictEqual(server.RetrackersMode, 2, 'до «Применить» сервер не тронут');
+
+        env.press('Применить');
+        await waitFor(() => env.calls.noty.some((t) => t.indexOf('TorrServer настроен') === 0), 2000, 'уведомление о настройке');
+
+        assert.strictEqual(server.RetrackersMode, 1);
+        assert.strictEqual(server.EnableRutorSearch, true);
+        assert.strictEqual(server.PreloadCache, 1);
+        assert.deepStrictEqual(server.TMDBSettings, { APIKey: '' }, 'остальные поля целы');
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'settings_component');
+
+        const item = env.$('<div><div class="settings-param__descr"></div></div>');
+
+        param(env, 'lw_tune_rollback').onRender(item);
+        assert.ok(item.find('.settings-param__descr').text().indexOf('Копия от') === 0);
+
+        param(env, 'lw_tune_rollback').onChange();
+        await waitFor(() => env.calls.noty.indexOf('Настройки TorrServer возвращены') >= 0, 2000, 'откат');
+        assert.deepStrictEqual(server, TS_REAL());
+
+        param(env, 'lw_tune_rollback').onChange();
+        assert.ok(env.calls.noty.indexOf('Откатывать нечего') >= 0);
+    });
+
+    await test('настройка TorrServer: если всё уже хорошо, окно так и говорит и ничего не предлагает', async () => {
+        const server = TS_REAL();
+
+        Object.assign(server, { RetrackersMode: 1, TrackersListURL: 'https://x/list.txt', EnableRutorSearch: true, PreloadCache: 1 });
+
+        const env = makeEnv({ store: TS_STORE, server });
+
+        param(env, 'lw_tune_pick').onChange();
+        await waitFor(() => env.text().indexOf('Сервер уже настроен хорошо') >= 0, 2000, 'окно «всё хорошо»');
+        assert.ok(env.top().el.find('.modal__button').filter((i, b) => env.$(b).text() === 'Применить').length === 0);
+
+        env.press('Закрыть');
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'settings_component');
+        assert.ok(!env.store.lw_ts_backup);
+    });
+
+    await test('настройка TorrServer: сервер не отвечает, понятная ошибка с «Повторить»', async () => {
+        const env = makeEnv({ store: TS_STORE, server: TS_REAL(), serverDown: true });
+
+        param(env, 'lw_tune_pick').onChange();
+        await waitFor(() => env.text().indexOf('Не удалось настроить TorrServer') >= 0, 2000, 'окно ошибки');
+        assert.ok(env.text().indexOf('TorrServer не ответил') >= 0);
+
+        const before = env.calls.stat.length;
+
+        env.press('Повторить');
+        await waitFor(() => env.text().indexOf('Не удалось настроить TorrServer') >= 0, 2000, 'повторная ошибка');
+
+        env.press('Закрыть');
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'settings_component');
+    });
+
+    await test('настройка TorrServer: отмена во время чтения закрывает окно, поздний ответ молчит', async () => {
+        const env = makeEnv({ store: TS_STORE, server: TS_REAL() });
+
+        param(env, 'lw_tune_pick').onChange();
+        assert.ok(env.text().indexOf('Читаю настройки TorrServer') >= 0);
+        env.top().params.onBack();
+        assert.strictEqual(env.modals.length, 0);
+
+        await sleep(60);
+        assert.strictEqual(env.modals.length, 0);
     });
 
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));

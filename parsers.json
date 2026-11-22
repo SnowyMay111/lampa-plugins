@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "updated": "2026-11-22",
+  "parsers": [
+    { "name": "jac.red", "type": "jackett", "url": "https://jac.red", "key": "" },
+    { "name": "jr.maxvol.pro", "type": "jackett", "url": "https://jr.maxvol.pro", "key": "" },
+    { "name": "jacred.pro", "type": "jackett", "url": "https://jacred.pro", "key": "" },
+    { "name": "jacred.viewbox.dev", "type": "jackett", "url": "https://jacred.viewbox.dev", "key": "" },
+    { "name": "spawn.pp.ua", "type": "jackett", "url": "https://spawn.pp.ua:59117", "key": "" }
+  ]
+}

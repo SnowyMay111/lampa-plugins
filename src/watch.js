@@ -13,9 +13,12 @@ window.lampa_watch_loaded = true;
 
 var S = LW.score;
 var SP = LW.speed;
+var LL = LW.list;
 
 var STORE_WISHES = 'lw_wishes';
 var STORE_LINE = 'lw_line_peak';
+var STORE_SORT = 'lw_sort';
+var PAGE = 40; // сколько раздач показываем сразу, остальные по кнопке «Показать ещё»
 var CFG = window.lampa_watch_config || {}; // для тестов: сокращает паузы
 var PENDING_TTL = 110000; // дольше этого торрент не ждём: Лампа сама сдаётся через 90 секунд
 var MEASURE_MS = CFG.measureMs || 12000;
@@ -26,6 +29,7 @@ var SETTLE_MS = CFG.settle === undefined ? 150 : CFG.settle;
 var pending = null;       // запуск, начатый нами: ждём список файлов и нажимаем нужный
 var cancelMeasure = null; // остановить идущий замер
 var runId = 0;            // номер поиска: поздний ответ отменённого поиска игнорируется
+var listModal = null;     // параметры открытого окна со списком: по ним его можно перерисовать на месте
 
 // ---------------------------------------------------------------- тексты и варианты
 
@@ -33,13 +37,35 @@ var TXT = {
     button: 'Лучшая раздача',
     wishesTitle: 'Что хотим смотреть',
     go: 'Найти и смотреть',
-    showList: 'Показать список',
+    showList: 'Все раздачи',
+    standardList: 'Обычный список Лампы',
+    refine: 'Уточнить поиск',
+    refineTitle: 'Что искать',
+    listKicker: 'Все раздачи',
+    sortLabel: 'Сортировка',
+    sortTitle: 'Сортировка',
+    filters: 'Фильтры',
+    filtersTitle: 'Фильтры',
+    anyValue: 'Любое',
+    junk: 'Камрипы и чужие фильмы',
+    junkShown: 'Показаны',
+    junkHidden: 'Скрыты',
+    resetFilters: 'Сбросить фильтры',
+    more: 'Показать ещё',
+    emptyFilters: 'Под эти фильтры ничего нет. Сбросьте фильтры или поменяйте их.',
+    emptyJunk: 'Подходящих раздач нет. В фильтрах можно показать камрипы и чужие фильмы.',
+    legend: 'Цветная точка справа — прикидка по числу раздающих: зелёная пойдёт плавно, жёлтая на грани, оранжевая скорее будет лагать, красная не рекомендуется. Точнее покажет замер при запуске.',
+    viewed: 'Смотрели',
+    bestMark: 'Лучшая',
     searching: 'Ищу раздачи',
     searchingSub: 'Парсер собирает раздачи, потом я выберу лучшую',
     nothing: 'Ничего не нашлось',
+    parserSub: 'Парсер не отвечает или не настроен. Кнопка ниже сама проверит доступные парсеры и подберёт рабочие, потом поиск повторится.',
     nothingSub: 'Парсер ничего не вернул или все раздачи не подошли. Попробуйте поменять пожелания или откройте обычный список.',
     parserError: 'Парсер не ответил',
+    fixParser: 'Подобрать парсер',
     best: 'Лучшая раздача',
+    chosen: 'Выбранная раздача',
     launch: 'Запустить',
     others: 'Другие раздачи',
     changeWishes: 'Пожелания',
@@ -200,8 +226,10 @@ function searchText(movie, season) {
     };
 }
 
-function searchObject(movie, season) {
+function searchObject(movie, season, query) {
     var s = searchText(movie, season);
+
+    if (query) s = { search: query, search_one: query, search_two: query };
 
     return { url: '', title: L().Lang.translate('title_torrents'), component: 'torrents', search: s.search, search_one: s.search_one, search_two: s.search_two, movie: movie, page: 1 };
 }
@@ -254,7 +282,41 @@ function addStyle() {
         '.lw-stats{opacity:.6;font-size:.9em;margin-top:.8em;line-height:1.5}',
         '.lw-bar{height:.5em;border-radius:.25em;background:rgba(255,255,255,.12);overflow:hidden;margin:.9em 0}',
         '.lw-bar i{display:block;height:100%;width:0;background:#2f6fe4;transition:width .4s}',
-        '.lw-live{font-size:1.1em;line-height:1.6}'
+        '.lw-live{font-size:1.1em;line-height:1.6}',
+        '.lw-cards{display:flex;flex-wrap:wrap;margin:.2em -.3em .5em}',
+        '.lw-card{flex:1 1 9em;margin:.3em;padding:.6em .9em;border-radius:.6em;background:rgba(255,255,255,.07)}',
+        '.lw-card b{display:block;font-size:1.7em;line-height:1.15;font-weight:600}',
+        '.lw-card span{opacity:.6;font-size:.85em}',
+        '.lw-qrow{display:flex;align-items:center;margin:.25em 0;font-size:.95em}',
+        '.lw-qrow__name{width:4.6em;opacity:.75}',
+        '.lw-qrow__bar{flex:1;height:.55em;border-radius:.3em;background:rgba(255,255,255,.1);overflow:hidden;margin:0 .8em}',
+        '.lw-qrow__bar i{display:block;height:100%;background:#2f6fe4}',
+        '.lw-qrow__n{width:2.4em;text-align:right;opacity:.75}',
+        '.lw-chips{margin:.5em 0 0;opacity:.85}',
+        '.lw-tools{display:flex;flex-wrap:wrap;margin:.6em -.25em .5em}',
+        '.lw-tool{margin:.25em;padding:.55em 1em;border-radius:.6em;background:rgba(255,255,255,.1)}',
+        '.lw-tool b{font-weight:600}',
+        '.lw-tool.focus{background:#fff;color:#000}',
+        '.lw-item{display:flex;align-items:center;padding:.7em 1em;margin-bottom:.35em;border-radius:.6em;background:rgba(255,255,255,.07)}',
+        '.lw-item.focus,.lw-more.focus{background:#fff;color:#000}',
+        '.lw-item__main{flex:1;min-width:0}',
+        '.lw-item__title{font-size:1.05em;line-height:1.3;word-break:break-word;margin-bottom:.4em}',
+        '.lw-item__side{margin-left:1.1em;text-align:right;white-space:nowrap;line-height:1.35}',
+        '.lw-item__side b{font-size:1.1em}',
+        '.lw-item__meta{opacity:.65;font-size:.85em}',
+        '.lw-item .lw-badge{margin-bottom:0;font-size:.85em}',
+        '.lw-item.focus .lw-badge{background:rgba(0,0,0,.12)}',
+        '.lw-item.focus .lw-badge--hot{background:#2f6fe4;color:#fff}',
+        '.lw-dot{flex:none;width:.8em;height:.8em;margin-left:1em;border-radius:50%}',
+        '.lw-dot--smooth{background:#6fcf97}',
+        '.lw-dot--edge{background:#f2c94c}',
+        '.lw-dot--lag{background:#f2994a}',
+        '.lw-dot--bad{background:#eb5757}',
+        '.lw-more{padding:.8em 1em;margin-bottom:.35em;border-radius:.6em;background:rgba(255,255,255,.07);text-align:center}',
+        '.lw-empty{padding:1.2em .4em;opacity:.7}',
+        '.lw-legend{margin-top:.8em;opacity:.5;font-size:.85em;line-height:1.4}',
+        // окно ввода Лампы по умолчанию лежит ниже окон (слой 21 против 50), и клавиатуры из «Уточнить поиск» было бы не видно
+        '.settings-input{z-index:60}'
     ].join('\n');
 
     var el = document.createElement('style');
@@ -492,7 +554,7 @@ function openWishes(movie) {
         html: box,
         buttons: [
             { name: TXT.go, onSelect: function () { closeModal(); findAndWatch(movie, w); } },
-            { name: TXT.showList, onSelect: function () { saveWishes(w); openStandardList(movie, w.season); } }
+            { name: TXT.showList, onSelect: function () { closeModal(); findAndWatch(movie, w, 'list'); } }
         ],
         onBack: function () { closeModal(); backToContent(); }
     });
@@ -500,7 +562,9 @@ function openWishes(movie) {
 
 // ---------------------------------------------------------------- поиск
 
-function findAndWatch(movie, w) {
+// mode: 'best' (по умолчанию) показывает лучшую раздачу, 'list' открывает весь список. query: свой поисковый запрос.
+// repaired: парсер в этом поиске уже подбирали заново, второй раз не пытаемся.
+function findAndWatch(movie, w, mode, query, repaired) {
     var my = ++runId;
     var started = new Date().getTime();
 
@@ -530,20 +594,40 @@ function findAndWatch(movie, w) {
         if (my !== runId) return;
 
         closeModal();
-        showNothing(movie, w, text);
+
+        // парсер молчит: подбираем другой сами и повторяем поиск; не вышло или выключено — даём кнопку
+        var again = function () { findAndWatch(movie, w, mode, query, true); };
+
+        if (!repaired && LW.setup && LW.setup.autoOn()) {
+            LW.setup.repairParser(function (status) {
+                if (my !== runId) return;
+
+                if (status === 'applied') return again();
+                if (status === 'cancel') return backToContent();
+
+                showNothing(movie, w, text, mode, null, again);
+            });
+
+            return;
+        }
+
+        showNothing(movie, w, text, mode, null, LW.setup ? again : null);
     }
 
     try {
-        L().Parser.get(searchObject(movie, w.season), function (json) {
+        L().Parser.get(searchObject(movie, w.season, query), function (json) {
             if (my !== runId) return;
 
             var picked = S.pick((json && json.Results) || [], w, movie);
 
             picked.seconds = Math.round((new Date().getTime() - started) / 1000);
+            picked.query = query || '';
 
             closeModal();
 
-            if (!picked.best) return showNothing(movie, w, '');
+            if (mode === 'list' && picked.ranked.length) return openList(movie, picked);
+
+            if (!picked.best) return showNothing(movie, w, '', mode, picked);
 
             if (w.instant) {
                 noty('Выбрано: ' + briefOf(picked.best));
@@ -560,21 +644,41 @@ function findAndWatch(movie, w) {
     }
 }
 
-function showNothing(movie, w, text) {
+// retry: если задан, парсер не ответил, и первой кнопкой идёт «Подобрать парсер»
+function showNothing(movie, w, text, mode, picked, retry) {
     var box = h('div', 'lw-box');
+    var buttons = [{ name: TXT.changeWishes, onSelect: function () { closeModal(); openWishes(movie); } }];
+
+    if (retry) {
+        buttons.unshift({ name: TXT.fixParser, onSelect: function () {
+            closeModal();
+
+            LW.setup.openParserSetup({ onDone: function (status) {
+                if (status === 'applied') retry();
+                else if (status === 'cancel' || status === 'none') backToContent();
+                else showNothing(movie, w, text, mode, picked, retry);
+            } });
+        } });
+    }
 
     box.append(h('div', 'lw-title', text || TXT.nothing));
-    box.append(h('div', 'lw-line', TXT.nothingSub));
+    box.append(h('div', 'lw-line', retry ? TXT.parserSub : TXT.nothingSub));
 
-    openModal({
-        title: '',
-        html: box,
-        buttons: [
-            { name: TXT.changeWishes, onSelect: function () { closeModal(); openWishes(movie); } },
-            { name: TXT.showList, onSelect: function () { openStandardList(movie, w.season); } }
-        ],
-        onBack: function () { closeModal(); backToContent(); }
-    });
+    buttons.push({ name: TXT.refine, onSelect: function () { refineSearch(movie, picked, w, mode); } });
+
+    // что-то нашлось, но всё отсеяно как мусор: даём посмотреть всё как есть
+    if (picked && picked.ranked.length) {
+        buttons.push({ name: TXT.showList + ' (' + picked.ranked.length + ')', onSelect: function () {
+            picked.view = newView();
+            picked.view.junk = true;
+            closeModal();
+            openList(movie, picked);
+        } });
+    }
+
+    buttons.push({ name: TXT.standardList, onSelect: function () { openStandardList(movie, w.season); } });
+
+    openModal({ title: '', html: box, buttons: buttons, onBack: function () { closeModal(); backToContent(); } });
 }
 
 // ---------------------------------------------------------------- результат
@@ -583,7 +687,7 @@ function showResult(movie, picked, entry) {
     var box = h('div', 'lw-box');
     var badges = h('div', 'lw-badges');
 
-    box.append(h('div', 'lw-kicker', TXT.best));
+    box.append(h('div', 'lw-kicker', entry === picked.best ? TXT.best : TXT.chosen));
     box.append(h('div', 'lw-title', shortText(entry.item.Title, 140)));
 
     badgesOf(entry).forEach(function (b) { badges.append(h('span', 'lw-badge' + (b.hot ? ' lw-badge--hot' : ''), b.t)); });
@@ -606,9 +710,15 @@ function showResult(movie, picked, entry) {
     if (picked.playable.length > 1) buttons.push({ name: TXT.others, onSelect: function () { showOthers(movie, picked, entry); } });
 
     buttons.push({ name: TXT.changeWishes, onSelect: function () { closeModal(); openWishes(movie); } });
-    buttons.push({ name: TXT.showList, onSelect: function () { openStandardList(movie, picked.wishes.season); } });
+    buttons.push({ name: TXT.showList, onSelect: function () { closeModal(); openList(movie, picked); } });
 
-    openModal({ title: '', html: box, buttons: buttons, onBack: function () { closeModal(); backToContent(); } });
+    openModal({ title: '', html: box, buttons: buttons, onBack: function () {
+        closeModal();
+
+        // пришли из списка: Назад возвращает в него, на то же место
+        if (picked.listOpen) openList(movie, picked);
+        else backToContent();
+    } });
 }
 
 function showOthers(movie, picked, current) {
@@ -623,6 +733,351 @@ function showOthers(movie, picked, current) {
         items: items,
         onSelect: function (a) { closeModal(); showResult(movie, picked, a.entry); },
         onBack: function () { L().Controller.toggle('modal'); }
+    });
+}
+
+// ---------------------------------------------------------------- список раздач
+
+function loadSort() {
+    var v = '';
+
+    try { v = L().Storage.get(STORE_SORT, '') || ''; } catch (e) {}
+
+    return LL.SORTS.some(function (x) { return x[0] === v; }) ? v : 'best';
+}
+
+function saveSort(v) {
+    try { L().Storage.set(STORE_SORT, v); } catch (e) {}
+}
+
+// Состояние списка живёт в самом результате поиска: после просмотра раздачи список открывается там же, где был
+function newView() {
+    return { sort: loadSort(), filters: {}, junk: false, limit: PAGE, focus: null };
+}
+
+function gbText(n) {
+    return (n >= 10 ? n.toFixed(0) : n.toFixed(1)).replace('.', ',');
+}
+
+function statCard(value, label) {
+    var card = h('div', 'lw-card');
+
+    card.append(h('b', '', String(value)));
+    card.append(h('span', '', label));
+
+    return card;
+}
+
+function listStats(shown, base, total) {
+    var s = LL.summary(shown);
+    var box = h('div', 'lw-statblock');
+    var cards = h('div', 'lw-cards');
+
+    cards.append(statCard(shown.length, 'показано из ' + base.length));
+    cards.append(statCard(s.smooth, 'потянут по прикидке'));
+    cards.append(statCard(s.maxSeeds, 'раздающих максимум, медиана ' + s.medianSeeds));
+    cards.append(statCard(s.maxGb ? gbText(s.minGb) + '–' + gbText(s.maxGb) : '—', 'ГБ, разброс размеров'));
+    box.append(cards);
+
+    var top = 0;
+
+    s.quality.forEach(function (q) { if (q.count > top) top = q.count; });
+
+    s.quality.forEach(function (q) {
+        var row = h('div', 'lw-qrow');
+        var bar = h('div', 'lw-qrow__bar');
+
+        bar.append($('<i></i>').css('width', Math.max(4, Math.round(q.count / top * 100)) + '%'));
+
+        row.append(h('div', 'lw-qrow__name', LL.valueLabel('quality', q.value)));
+        row.append(bar);
+        row.append(h('div', 'lw-qrow__n', String(q.count)));
+        box.append(row);
+    });
+
+    var chips = [];
+
+    if (s.hdr) chips.push('HDR ' + s.hdr);
+    if (s.dv) chips.push('Dolby Vision ' + s.dv);
+    if (s.dub) chips.push('Дубляж ' + s.dub);
+    if (s.mvo) chips.push('Многоголосая ' + s.mvo);
+    if (s.subs) chips.push('Субтитры ' + s.subs);
+    if (s.viewed) chips.push(TXT.viewed + ' ' + s.viewed);
+
+    s.trackers.slice(0, 4).forEach(function (t) { chips.push(t.value + ' ' + t.count); });
+
+    if (total > base.length) chips.push('скрыто как мусор ' + (total - base.length));
+
+    if (chips.length) box.append(h('div', 'lw-chips', chips.join(' · ')));
+
+    return box;
+}
+
+function listRow(movie, picked, entry, index) {
+    var row = h('div', 'lw-item selector');
+    var main = h('div', 'lw-item__main');
+    var side = h('div', 'lw-item__side');
+    var badges = h('div', 'lw-item__badges');
+    var v = VERDICT[entry.forecast.level] || VERDICT.unknown;
+    var date = LL.dateLabel(entry);
+
+    main.append(h('div', 'lw-item__title', shortText(entry.item.Title, 110)));
+
+    if (entry === picked.best) badges.append(h('span', 'lw-badge lw-badge--hot', TXT.bestMark));
+
+    badgesOf(entry).slice(0, 7).forEach(function (b) { badges.append(h('span', 'lw-badge' + (b.hot ? ' lw-badge--hot' : ''), b.t)); });
+
+    if (entry.item.viewed) badges.append(h('span', 'lw-badge', TXT.viewed));
+
+    main.append(badges);
+
+    side.append(h('b', '', S.formatSize(entry.item.Size) || '?'));
+    side.append(h('div', '', '↑' + entry.seeds));
+    side.append(h('div', 'lw-item__meta', (entry.item.Tracker || '?') + (date ? ' · ' + date : '')));
+
+    row.append(main);
+    row.append(side);
+    row.append(h('div', 'lw-dot lw-dot--' + v.cls).attr('title', v.head));
+
+    row.on('hover:enter', function () {
+        picked.view.focus = { type: 'row', index: index };
+        listModal = null;
+
+        closeModal();
+        showResult(movie, picked, entry);
+    });
+
+    return row;
+}
+
+function listTool(label, value, onEnter) {
+    var el = h('div', 'lw-tool selector');
+
+    el.append(document.createTextNode(label));
+
+    if (value) el.append(h('b', '', value));
+
+    el.on('hover:enter', onEnter);
+
+    return el;
+}
+
+function buildList(movie, picked) {
+    var view = picked.view;
+    var base = LL.visible(picked.ranked, view.junk);
+    var shown = LL.sort(LL.filter(base, view.filters), view.sort);
+    var root = h('div', 'lw-box lw-list');
+    var tools = h('div', 'lw-tools');
+    var rows = [];
+    var sortBtn;
+    var filterBtn;
+    var active = LL.activeCount(view.filters);
+    var focus = null;
+
+    root.append(h('div', 'lw-kicker', TXT.listKicker + (picked.query ? ' · «' + shortText(picked.query, 40) + '»' : '')));
+    root.append(h('div', 'lw-title', shortText(movie.title || movie.name || '', 90)));
+    root.append(listStats(shown, base, picked.ranked.length));
+
+    sortBtn = listTool(TXT.sortLabel + ': ', LL.sortName(view.sort), function () { pickSort(movie, picked); });
+    filterBtn = listTool(TXT.filters, active ? ' · ' + active : '', function () { pickFilters(movie, picked); });
+
+    tools.append(sortBtn);
+    tools.append(filterBtn);
+    tools.append(listTool(TXT.refine, '', function () { refineSearch(movie, picked, picked.wishes, 'list'); }));
+    tools.append(listTool(TXT.standardList, '', function () { listModal = null; picked.listOpen = false; openStandardList(movie, picked.wishes.season); }));
+    root.append(tools);
+
+    shown.slice(0, view.limit).forEach(function (entry, i) {
+        var row = listRow(movie, picked, entry, i);
+
+        rows.push(row);
+        root.append(row);
+    });
+
+    if (shown.length > view.limit) {
+        var more = h('div', 'lw-more selector', TXT.more + ' (' + (shown.length - view.limit) + ')');
+
+        more.on('hover:enter', function () {
+            view.focus = { type: 'row', index: view.limit };
+            view.limit += PAGE;
+            redrawList(movie, picked);
+        });
+
+        root.append(more);
+    }
+
+    if (!shown.length) root.append(h('div', 'lw-empty', shown.length === 0 && !base.length ? TXT.emptyJunk : TXT.emptyFilters));
+
+    if (shown.length) root.append(h('div', 'lw-legend', TXT.legend));
+
+    var f = view.focus;
+
+    if (f && f.type === 'tool') focus = f.name === 'filter' ? filterBtn : sortBtn;
+    else if (f && f.type === 'row') focus = rows[f.index] || rows[rows.length - 1] || null;
+    // по умолчанию фокус на первой кнопке: если сразу встать на раздачу, шапка со статистикой уедет за край
+
+    return { root: root, focus: focus ? focus[0] : undefined };
+}
+
+// Фокус на панели кнопок: Лампа прокрутила бы окно к ней и спрятала шапку со статистикой, поэтому возвращаем наверх
+function showListTop(view) {
+    if (view.focus && view.focus.type === 'row') return;
+
+    try { L().Modal.scroll().reset(); } catch (e) {}
+}
+
+function openList(movie, picked) {
+    if (!picked.view) picked.view = newView();
+
+    picked.listOpen = true;
+
+    var built = buildList(movie, picked);
+    var params = {
+        title: '',
+        html: built.root,
+        size: 'large',
+        scroll_to_center: true,
+        select: built.focus,
+        onBack: function () {
+            listModal = null;
+            picked.listOpen = false;
+
+            closeModal();
+            backToContent();
+        }
+    };
+
+    listModal = params;
+    openModal(params);
+    showListTop(picked.view);
+}
+
+// Перерисовывает список в том же окне (Modal.update). В старой Лампе без него окно создаётся заново.
+function redrawList(movie, picked) {
+    var Modal = L().Modal;
+
+    if (listModal && Modal && Modal.update) {
+        try {
+            var built = buildList(movie, picked);
+
+            listModal.select = built.focus;
+            Modal.update(built.root);
+            showListTop(picked.view);
+
+            return;
+        } catch (e) {
+            log('Modal.update: ' + e);
+        }
+    }
+
+    listModal = null;
+    closeModal();
+    openList(movie, picked);
+}
+
+function pickSort(movie, picked) {
+    var view = picked.view;
+
+    L().Select.show({
+        title: TXT.sortTitle,
+        items: LL.SORTS.map(function (x) { return { title: x[1], key: x[0], selected: x[0] === view.sort }; }),
+        onSelect: function (a) {
+            view.sort = a.key;
+            view.focus = { type: 'tool', name: 'sort' };
+            saveSort(a.key);
+            redrawList(movie, picked);
+        },
+        onBack: function () { L().Controller.toggle('modal'); }
+    });
+}
+
+function pickFilters(movie, picked) {
+    var view = picked.view;
+    var facets = LL.facets(LL.visible(picked.ranked, view.junk));
+    var items = [];
+
+    LL.FILTERS.forEach(function (key) {
+        var current = view.filters[key];
+
+        // фильтр с одним вариантом ничего не отсеивает: не загромождаем меню
+        if (facets[key].length < 2 && !current) return;
+
+        items.push({ title: LL.KEY_LABEL[key], subtitle: current ? LL.valueLabel(key, current, LANG_NAME) : TXT.anyValue, key: key });
+    });
+
+    items.push({ title: TXT.junk, subtitle: view.junk ? TXT.junkShown : TXT.junkHidden, key: '_junk' });
+
+    if (LL.activeCount(view.filters)) items.push({ title: TXT.resetFilters, key: '_reset' });
+
+    L().Select.show({
+        title: TXT.filtersTitle,
+        items: items,
+        onSelect: function (a) {
+            view.focus = { type: 'tool', name: 'filter' };
+            view.limit = PAGE;
+
+            if (a.key === '_junk') {
+                view.junk = !view.junk;
+                redrawList(movie, picked);
+            } else if (a.key === '_reset') {
+                view.filters = {};
+                redrawList(movie, picked);
+            } else {
+                pickFilterValue(movie, picked, a.key, facets[a.key]);
+            }
+        },
+        onBack: function () { L().Controller.toggle('modal'); }
+    });
+}
+
+function pickFilterValue(movie, picked, key, values) {
+    var view = picked.view;
+    var current = view.filters[key];
+    var items = [{ title: TXT.anyValue, value: '', selected: !current }];
+
+    values.forEach(function (v) {
+        items.push({ title: LL.valueLabel(key, v.value, LANG_NAME) + ' · ' + v.count, value: v.value, selected: current === v.value });
+    });
+
+    L().Select.show({
+        title: LL.KEY_LABEL[key],
+        items: items,
+        onSelect: function (a) {
+            if (a.value) view.filters[key] = a.value;
+            else delete view.filters[key];
+
+            view.focus = { type: 'tool', name: 'filter' };
+            redrawList(movie, picked);
+        },
+        onBack: function () { L().Controller.toggle('modal'); }
+    });
+}
+
+// Свой поисковый запрос, как «Уточнить» в обычном списке Лампы
+function refineSearch(movie, picked, w, mode) {
+    var Input = L().Input;
+
+    if (!Input || !Input.edit) {
+        noty('В этой версии Лампы нет ввода текста');
+        return;
+    }
+
+    var current = (picked && picked.query) || searchText(movie, w.season).search;
+
+    Input.edit({ free: true, title: TXT.refineTitle, nosave: true, value: current }, function (value) {
+        value = ((value || '') + '').replace(/^\s+|\s+$/g, '');
+
+        if (!value) {
+            try { L().Controller.toggle('modal'); } catch (e) {}
+            return;
+        }
+
+        listModal = null;
+
+        if (picked) picked.listOpen = false;
+
+        closeModal();
+        findAndWatch(movie, w, mode, value);
     });
 }
 
@@ -894,4 +1349,5 @@ else window.Lampa.Listener.follow('app', function (e) {
     if (e.type === 'ready') start();
 });
 
+LW.ui = { h: h, openModal: openModal, closeModal: closeModal, noty: noty, shortText: shortText, log: log };
 LW.watch = { start: start, openWishes: openWishes, addButton: addButton };

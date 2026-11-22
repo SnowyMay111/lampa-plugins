@@ -6,7 +6,7 @@ var fs = require('fs');
 var path = require('path');
 
 var ROOT = __dirname;
-var MODULES = ['speed', 'score', 'failover', 'watch']; // порядок важен: оценка использует прогноз скорости
+var MODULES = ['speed', 'score', 'list', 'parser', 'tune', 'failover', 'watch', 'setup']; // порядок важен: оценка использует прогноз скорости, окна подбора парсера используют LW.ui из watch
 
 var manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 var entry = manifest.plugins.filter(function (p) { return p.id === 'lampa_watch'; })[0];

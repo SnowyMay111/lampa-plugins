@@ -8,9 +8,9 @@ const assert = require('assert');
 
 const ctx = vm.createContext({ LW: {}, console, setTimeout, clearTimeout, Date, Math, JSON, parseInt, parseFloat, isNaN, RegExp, Object });
 
-['speed.js', 'score.js'].forEach((f) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8'), ctx, { filename: f }));
+['speed.js', 'score.js', 'list.js'].forEach((f) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8'), ctx, { filename: f }));
 
-const { score, speed } = ctx.LW;
+const { score, speed, list } = ctx.LW;
 const plain = (x) => JSON.parse(JSON.stringify(x));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -306,6 +306,114 @@ const ALL = [A, B, C, D, E, F, G, H, I];
         const get = (url, ok) => setTimeout(() => ok({ download_speed: 0, preloaded_bytes: 50e6, preload_size: 50e6 }), 1);
         const res = await new Promise((done) => speed.measure({ url: 'u&preload', get, duration: 5000, interval: 10, warmup: 0 }, done));
         assert.ok(res.ok && res.avgMbps > 0);
+    });
+
+
+    // ----------------------------------------------------------- список: сортировка, фильтры, статистика
+    const listed = () => score.rank(ALL.map((x, n) => Object.assign({}, x, { PublishDate: '2026-0' + (1 + (n % 9)) + '-1' + n + 'T10:00:00Z' })), score.DEFAULT_WISHES, fightClub);
+    const titles = (arr) => arr.map((e) => e.item.Title.slice(0, 22));
+
+    await test('список: мусор (камрип, 3D-«чужой», другой фильм) по умолчанию скрыт', () => {
+        const all = listed();
+        const shown = list.visible(all, false);
+        assert.ok(shown.length < all.length);
+        assert.ok(shown.every((e) => e.playable && e.relevance > 0));
+        assert.strictEqual(list.visible(all, true).length, all.length);
+        assert.ok(!shown.some((e) => /CAMRip/.test(e.item.Title)));
+    });
+
+    await test('список: сортировка по раздающим, размеру, названию, источнику, дате, просмотренным', () => {
+        const all = listed();
+        const bySeeds = list.sort(all, 'seeds');
+        assert.ok(bySeeds.every((e, i) => i === 0 || bySeeds[i - 1].seeds >= e.seeds));
+        const bySize = list.sort(all, 'size');
+        assert.ok(bySize.every((e, i) => i === 0 || bySize[i - 1].gb >= e.gb));
+        const byName = list.sort(all, 'name');
+        assert.ok(byName.every((e, i) => i === 0 || byName[i - 1].item.Title.toLowerCase() <= e.item.Title.toLowerCase()));
+        const byDate = list.sort(all, 'date');
+        assert.ok(byDate.every((e, i) => i === 0 || Date.parse(byDate[i - 1].item.PublishDate) >= Date.parse(e.item.PublishDate)));
+
+        const marked = all.map((e, i) => { e.item.viewed = i === 3; return e; });
+        assert.strictEqual(list.sort(marked, 'viewed')[0], marked[3]);
+
+        // без ключа и с неизвестным ключом — порядок рейтинга
+        assert.deepStrictEqual(titles(list.sort(all, 'best')), titles(all));
+        assert.deepStrictEqual(titles(list.sort(all, 'нет такого')), titles(all));
+    });
+
+    await test('список: сортировка не меняет исходный массив и устойчива при равных значениях', () => {
+        const all = listed();
+        const before = titles(all);
+        list.sort(all, 'tracker');
+        assert.deepStrictEqual(titles(all), before);
+        // все раздачи с одного трекера: порядок по раздающим, затем по месту
+        const same = list.sort(all.filter((e) => e.item.Tracker === 'RuTracker'), 'tracker');
+        assert.ok(same.every((e, i) => i === 0 || same[i - 1].seeds >= e.seeds));
+    });
+
+    await test('список: фильтры по качеству, HDR, Dolby Vision, озвучке, языку, трекеру, году', () => {
+        const all = listed();
+        const q = list.filter(all, { quality: '2160' });
+        assert.ok(q.length >= 3 && q.every((e) => e.info.quality === 2160));
+        const hdr = list.filter(all, { hdr: 'yes' });
+        assert.ok(hdr.length && hdr.every((e) => e.info.hdr));
+        assert.ok(list.filter(all, { dv: 'yes' }).every((e) => e.info.dv));
+        assert.ok(list.filter(all, { voice: 'dub' }).every((e) => e.info.dub));
+        assert.ok(list.filter(all, { lang: 'uk' }).every((e) => e.info.langs.indexOf('uk') >= 0));
+        assert.ok(list.filter(all, { d3: 'yes' }).every((e) => e.info.d3));
+        assert.ok(list.filter(all, { year: '2022' }).every((e) => e.info.years.indexOf(2022) >= 0));
+        // несколько фильтров сразу: пересечение
+        const both = list.filter(all, { quality: '2160', hdr: 'yes', dv: 'yes' });
+        assert.ok(both.length >= 1 && both.every((e) => e.info.quality === 2160 && e.info.hdr && e.info.dv));
+        // пустые значения не фильтруют
+        assert.strictEqual(list.filter(all, { quality: null, hdr: '' }).length, all.length);
+        assert.strictEqual(list.activeCount({ quality: '2160', hdr: null, dv: '' }), 1);
+    });
+
+    await test('список: сезоны раздачи с диапазоном попадают в каждый свой сезон', () => {
+        const pack = score.evaluate({ Title: 'Dark / Тьма (Сезон: 1-3) 1080p', Size: 30 * GB, Seeders: 20, Peers: 25, Tracker: 'Kinozal' }, score.DEFAULT_WISHES, { original_name: 'Dark', name: 'Тьма', first_air_date: '2017-12-01', number_of_seasons: 3 });
+        assert.deepStrictEqual(plain(list.valuesOf(pack, 'season')), ['1', '2', '3']);
+        assert.strictEqual(list.filter([pack], { season: '2' }).length, 1);
+        assert.strictEqual(list.filter([pack], { season: '4' }).length, 0);
+        const huge = score.evaluate({ Title: 'Show (Сезон: 1-999) 1080p', Size: 30 * GB, Seeders: 5, Peers: 5, Tracker: 'x' }, score.DEFAULT_WISHES, {});
+        assert.ok(list.valuesOf(huge, 'season').length <= 60);
+    });
+
+    await test('список: варианты фильтра с числом раздач, «не указано» в конце', () => {
+        const f = list.facets(listed());
+        assert.strictEqual(f.quality[0].value, '2160'); // лучшее качество первым
+        const total = f.quality.reduce((n, v) => n + v.count, 0);
+        assert.strictEqual(total, ALL.length);
+        assert.deepStrictEqual(plain(f.hdr.map((v) => v.value)), ['yes', 'no']);
+        assert.strictEqual(f.year[f.year.length - 1].value === '?' || f.year[0].value >= f.year[f.year.length - 1].value, true);
+        assert.strictEqual(list.valueLabel('quality', '2160'), '4K');
+        assert.strictEqual(list.valueLabel('voice', 'dub'), 'Дубляж');
+        assert.strictEqual(list.valueLabel('lang', 'uk', { uk: 'Украинский' }), 'Украинский');
+        assert.strictEqual(list.valueLabel('season', '2'), 'Сезон 2');
+        assert.strictEqual(list.valueLabel('hdr', 'no'), 'Нет');
+        assert.strictEqual(list.valueLabel('tracker', '?'), 'Не указано');
+    });
+
+    await test('список: сводка для шапки (качество, HDR, трекеры, раздающие, размеры)', () => {
+        const shown = list.visible(listed(), false);
+        const s = list.summary(shown);
+        assert.strictEqual(s.count, shown.length);
+        assert.strictEqual(s.quality[0].value, '2160');
+        assert.ok(s.hdr >= 2 && s.dv >= 1 && s.dub >= 1);
+        assert.strictEqual(s.maxSeeds, Math.max.apply(null, shown.map((e) => e.seeds)));
+        assert.ok(s.medianSeeds > 0 && s.medianSeeds <= s.maxSeeds);
+        assert.ok(s.minGb > 0 && s.maxGb >= s.minGb);
+        assert.ok(s.trackers[0].value === 'RuTracker' && s.trackers[0].count === shown.length);
+        const empty = list.summary([]);
+        assert.strictEqual(empty.count, 0);
+        assert.strictEqual(empty.maxGb, 0);
+        assert.deepStrictEqual(plain(empty.quality), []);
+    });
+
+    await test('список: дата в виде дд.мм.гггг и пустая строка, если даты нет', () => {
+        const e = score.evaluate(Object.assign({}, A, { PublishDate: '2026-03-07T10:00:00Z' }), score.DEFAULT_WISHES, fightClub);
+        assert.ok(/^\d{2}\.03\.2026$/.test(list.dateLabel(e)) || /^\d{2}\.\d{2}\.2026$/.test(list.dateLabel(e)));
+        assert.strictEqual(list.dateLabel(score.evaluate(A, score.DEFAULT_WISHES, fightClub)), '');
     });
 
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));
