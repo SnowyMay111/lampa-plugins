@@ -1,10 +1,10 @@
 {
   "plugins": [
     {
-      "id": "torrserver_failover",
-      "name": "TorrServer Failover",
-      "file": "plugins/torrserver_failover.js",
-      "version": "1.0.0",
+      "id": "lampa_watch",
+      "name": "Lampa Watch",
+      "file": "plugins/lampa_watch.js",
+      "version": "1.1.0",
       "enabled": true
     }
   ]
