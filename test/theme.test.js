@@ -349,6 +349,15 @@ async function test(name, fn) {
         assert.ok(!/lw-hero[^{]*\{[^}]*transition:[^;}]*(width|height|top|left)/.test(css), 'в герое нет анимации размеров');
     });
 
+    await test('кнопки героя: скрыты вне главной, выбранная светлая таблетка, переходов фона и размытия нет', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+        assert.ok(/body\.lw-theme \.lw-hero__btns\{display:none\}/.test(css), 'без lw-home кнопки скрыты');
+        assert.ok(/body\.lw-theme\.lw-home \.lw-hero__btns\{display:flex[^}]*pointer-events:auto/.test(css), 'мышь на кнопки героя работает');
+        assert.ok(/\.lw-hero__btn\.focus[^{]*\{background:var\(--paper\);color:var\(--onpaper\);transform:scale\(1\.06\)/.test(css), 'выбранная кнопка светлая и чуть больше');
+        assert.ok(!/\.lw-hero__btn[^{]*\{[^}]*(transition|backdrop-filter|blur\()/.test(css), 'у кнопок нет переходов и размытия');
+    });
+
     await test('страница фильма: ряды под первым экраном на подложке, шапка с тенью сверху, всё без размытия', () => {
         const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 

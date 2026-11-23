@@ -12,7 +12,8 @@
  */
 LW.hero = (function () {
     var api = { delay: 140 };
-    var state = { on: false, bound: false, el: null, parts: null, key: '', url: '', layer: 0, t: null, syncT: null };
+    var TXT = { more: 'Подробнее', fav: '+ В закладки', faved: '✓ В закладках', added: 'Добавлено в закладки', removed: 'Убрано из закладок' };
+    var state = { on: false, bound: false, reg: false, el: null, parts: null, card: null, last: null, key: '', url: '', layer: 0, t: null, syncT: null, orig: null };
 
     function L() {
         return window.Lampa;
@@ -37,6 +38,56 @@ LW.hero = (function () {
         }
     }
 
+    // Кнопка героя: обычный .selector Лампы, пульт жмёт на неё через событие hover:enter
+    function button(cls, text, fn) {
+        var b = make('div', cls + ' selector');
+
+        b.textContent = text;
+        b.addEventListener('hover:enter', fn);
+        b.addEventListener('hover:focus', function () { state.last = b; });
+
+        return b;
+    }
+
+    function isTv(d) {
+        return !!(d.first_air_date || d.name || d.media_type === 'tv');
+    }
+
+    // «Подробнее»: открываем карточку так же, как Лампа открывает её по нажатию на постер
+    function openCard() {
+        var d = state.card;
+
+        if (!d) return;
+
+        try {
+            L().Activity.push({ url: '', component: 'full', id: d.id, method: isTv(d) ? 'tv' : 'movie', card: d, source: d.source || 'tmdb' });
+        } catch (e) { /* не открылось — остаёмся на главной */ }
+    }
+
+    function faved() {
+        try {
+            return !!(state.card && L().Favorite.check(state.card).book);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function paintFav() {
+        if (state.parts && state.parts.fav) state.parts.fav.textContent = faved() ? TXT.faved : TXT.fav;
+    }
+
+    function toggleFav() {
+        if (!state.card) return;
+
+        try {
+            var added = L().Favorite.toggle('book', state.card);
+
+            if (L().Noty && L().Noty.show) L().Noty.show(added ? TXT.added : TXT.removed);
+        } catch (e) { /* закладка не поставилась — кнопка останется прежней */ }
+
+        paintFav();
+    }
+
     function build() {
         if (state.el && state.el.parentNode) return state.el;
 
@@ -48,12 +99,19 @@ LW.hero = (function () {
         var a = make('div', 'lw-hero__img');
         var b = make('div', 'lw-hero__img');
         var text = make('div', 'lw-hero__text');
+        var btns = make('div', 'lw-hero__btns');
         var p = { kicker: make('div', 'lw-hero__kicker'), title: make('div', 'lw-hero__title'), meta: make('div', 'lw-hero__meta'), desc: make('div', 'lw-hero__desc'), imgs: [a, b] };
+
+        p.more = button('lw-hero__btn lw-hero__btn--main', TXT.more, openCard);
+        p.fav = button('lw-hero__btn', TXT.fav, toggleFav);
+        btns.appendChild(p.more);
+        btns.appendChild(p.fav);
 
         text.appendChild(p.kicker);
         text.appendChild(p.title);
         text.appendChild(p.meta);
         text.appendChild(p.desc);
+        text.appendChild(btns);
         el.appendChild(a);
         el.appendChild(b);
         el.appendChild(make('div', 'lw-hero__shade'));
@@ -62,6 +120,7 @@ LW.hero = (function () {
 
         state.el = el;
         state.parts = p;
+        state.last = null;
         state.key = '';
 
         return el;
@@ -82,7 +141,7 @@ LW.hero = (function () {
     }
 
     function kicker(d) {
-        var tv = !!(d.first_air_date || d.name || d.media_type === 'tv');
+        var tv = isTv(d);
         var year = String(d.release_date || d.first_air_date || '').slice(0, 4);
 
         return (tv ? 'Сериал' : 'Фильм') + (year ? ' · ' + year : '');
@@ -127,6 +186,7 @@ LW.hero = (function () {
 
         var p = state.parts;
 
+        state.card = d;
         p.kicker.textContent = kicker(d);
         p.title.textContent = d.title || d.name || '';
         p.desc.textContent = d.overview || '';
@@ -139,6 +199,7 @@ LW.hero = (function () {
             p.meta.appendChild(chip);
         }
 
+        paintFav();
         image(d.backdrop_path);
     }
 
@@ -191,14 +252,88 @@ LW.hero = (function () {
         try { L().Listener.follow('activity', later); } catch (e) { /* без событий синхронизируем при фокусе */ }
     }
 
+    // ---- пульт: кнопки героя входят в обычную навигацию Лампы ----
+    // Из первого ряда «вверх» Лампа сама зовёт Controller.toggle('head'). Мы подменяем только этот вызов:
+    // на главной он сначала ведёт на кнопки героя, а уже с них «вверх» попадает в шапку, «вниз» возвращает в ряды.
+    function ctl() {
+        return L() && L().Controller;
+    }
+
+    function current() {
+        try {
+            return ctl().enabled().name;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function heroReady() {
+        return !!(state.on && state.el && state.el.parentNode && state.card && isHome() && document.body.classList.contains('lw-home'));
+    }
+
+    function register() {
+        var C = ctl();
+
+        if (state.reg || !C || typeof C.add !== 'function') return;
+
+        state.reg = true;
+
+        C.add('lw_hero', {
+            toggle: function () {
+                C.collectionSet(state.el);
+                C.collectionFocus(state.last && state.last.parentNode ? state.last : false, state.el);
+            },
+            // двух кнопок хватает ручного переключения, общий Navigator Лампы тут не нужен
+            left: function () {
+                if (state.parts && state.last === state.parts.fav) C.collectionFocus(state.parts.more, state.el);
+                else C.toggle('menu');
+            },
+            right: function () {
+                if (state.parts && state.last === state.parts.more) C.collectionFocus(state.parts.fav, state.el);
+            },
+            up: function () { C.toggle('head'); },
+            down: function () { C.toggle('content'); },
+            back: function () { C.toggle('content'); }
+        });
+    }
+
+    function patch() {
+        var C = ctl();
+
+        if (!C || typeof C.toggle !== 'function' || C.toggle.lwHero) return;
+
+        var orig = C.toggle;
+        var fn = function (name) {
+            if (heroReady()) {
+                var now = current();
+
+                // из рядов вверх, а из шапки вниз: сначала кнопки героя
+                if ((name === 'head' && (now === 'items_line' || now === 'content')) || (name === 'content' && now === 'head')) {
+                    return orig.call(this, 'lw_hero');
+                }
+            }
+
+            return orig.apply(this, arguments);
+        };
+
+        fn.lwHero = true;
+        C.toggle = fn;
+    }
+
     function on() {
         state.on = true;
         wrap();
         bind();
+        register();
+        patch();
         sync();
     }
 
     function off() {
+        if (current() === 'lw_hero') {
+            try { ctl().toggle('content'); } catch (e) { /* фокус вернётся при следующем действии */ }
+        }
+
         state.on = false;
         clearTimeout(state.t);
         document.body.classList.remove('lw-home');
@@ -207,6 +342,8 @@ LW.hero = (function () {
 
         state.el = null;
         state.parts = null;
+        state.card = null;
+        state.last = null;
         state.key = '';
         state.url = '';
     }
@@ -217,6 +354,9 @@ LW.hero = (function () {
     api.show = show;
     api.isHome = isHome;
     api.kicker = kicker;
+    api.open = openCard;
+    api.fav = toggleFav;
+    api.card = function () { return state.card; };
 
     return api;
 })();
