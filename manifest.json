@@ -4,7 +4,7 @@
       "id": "lampa_watch",
       "name": "Lampa Watch",
       "file": "plugins/lampa_watch.js",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "enabled": true
     }
   ]

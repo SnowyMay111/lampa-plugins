@@ -6,7 +6,7 @@ var fs = require('fs');
 var path = require('path');
 
 var ROOT = __dirname;
-var MODULES = ['health', 'speed', 'score', 'series', 'list', 'parser', 'tune', 'failover', 'theme', 'watch', 'setup']; // порядок важен: журнал ошибок (health) нужен всем, оценка использует прогноз скорости, окна подбора парсера используют LW.ui из watch, настройки темы добавляет setup
+var MODULES = ['health', 'speed', 'score', 'series', 'list', 'parser', 'tune', 'failover', 'hero', 'theme', 'watch', 'setup']; // порядок важен: журнал ошибок (health) нужен всем, оценка использует прогноз скорости, окна подбора парсера используют LW.ui из watch, настройки темы добавляет setup
 
 // CSS темы живёт в src/theme.css: убираем комментарии и лишние пробелы и вшиваем в theme.js строкой
 function themeCss() {

@@ -285,6 +285,30 @@ body.lw-theme .player-panel__playpause,body.lw-theme .player-panel__playpause:no
 body.lw-theme .player-panel__playpause svg{color:var(--onpaper)}
 body.lw-theme .player-skip.focus{background:var(--paper);color:var(--onpaper)}
 
+/* ---------- главная: герой с кадром сверху, ряды окном снизу (body.lw-home ставит src/hero.js) ---------- */
+body.lw-theme .lw-hero{display:none}
+body.lw-theme.lw-home .lw-hero{display:block;position:absolute;left:0;top:0;right:0;height:60vh;overflow:hidden;pointer-events:none}
+body.lw-theme.lw-home .lw-hero__img{position:absolute;left:0;top:0;right:0;bottom:0;background-size:cover;background-position:72% 22%;opacity:0;transition:opacity .5s}
+body.lw-theme.lw-home .lw-hero__img.is-on{opacity:1}
+body.lw-theme.lw-home .lw-hero__shade{position:absolute;left:0;top:0;right:0;bottom:0;background:linear-gradient(90deg,var(--bg) 3%,rgba(14,18,24,.68) 38%,rgba(14,18,24,0) 76%),linear-gradient(0deg,var(--bg) 4%,rgba(14,18,24,.55) 22%,rgba(14,18,24,0) 52%),linear-gradient(180deg,rgba(14,18,24,.6),rgba(14,18,24,0) 24%)}
+body.lw-theme.lw-home .lw-hero__text{position:absolute;left:4.5%;bottom:10vh;width:46%}
+body.lw-theme.lw-home .lw-hero__kicker{margin-bottom:.8vw;font-size:.95vw;letter-spacing:.18em;text-transform:uppercase;color:var(--word)}
+body.lw-theme.lw-home .lw-hero__title{margin-bottom:.9vw;font-size:4.4vw;font-weight:300;letter-spacing:-.035em;line-height:1.04;color:var(--ink)}
+body.lw-theme.lw-home .lw-hero__meta{display:flex;margin-bottom:1vw}
+body.lw-theme.lw-home .lw-hero__chip{margin-right:.6vw;padding:.25vw .85vw;border-radius:2em;background:rgba(255,255,255,.15);font-size:1vw;color:var(--ink)}
+body.lw-theme.lw-home .lw-hero__desc{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font-size:1.1vw;line-height:1.5;color:var(--dim)}
+body.lw-theme.lw-home .activitys{margin-top:44vh;height:48vh}
+body.lw-theme.lw-home .activity--active .items-line{font-size:.66em}
+body.lw-theme .lw-hero{transition:opacity .6s}
+body.lw-theme.lw-idle .lw-hero{opacity:.5}
+
+/* ---------- карточка фильма: кадр во весь экран, афиши слева нет, название крупно слева (как страница фильма в Apple TV) ---------- */
+body.lw-theme .full-start-new__left{display:none}
+body.lw-theme .full-start-new__right{margin-left:0;width:54%}
+body.lw-theme .full-start__background{opacity:1}
+body.lw-theme .full-start-new::before{content:"";position:absolute;left:0;top:-148px;right:0;bottom:-300px;background:linear-gradient(90deg,var(--bg) 6%,rgba(14,18,24,.72) 38%,rgba(14,18,24,0) 72%),linear-gradient(0deg,var(--bg) 4%,rgba(14,18,24,0) 40%);pointer-events:none;z-index:0}
+body.lw-theme .full-start-new__body{position:relative;z-index:1}
+
 /* ---------- защита OLED ---------- */
 body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}
 body.lw-theme.lw-idle .card:not(.focus),body.lw-theme.lw-idle .menu__item:not(.focus),body.lw-theme.lw-idle .items-line__title{opacity:.55}

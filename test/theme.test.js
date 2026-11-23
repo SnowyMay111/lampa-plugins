@@ -325,6 +325,30 @@ async function test(name, fn) {
         assert.ok(/rgba\(255,107,107/.test(rule('body.lw-theme .lw-dgc[data-level=bad]')) && /rgba\(255,210,90/.test(rule('body.lw-theme .lw-dgc[data-level=warn]')), 'рамка плитки меняется со статусом');
     });
 
+    await test('герой главной: включается и выключается вместе с оформлением', () => {
+        const e = makeEnv();
+        const calls = [];
+
+        e.LW.hero = { on: () => calls.push('on'), off: () => calls.push('off') };
+        e.data.lw_theme = true;
+        e.T.start();
+        assert.deepStrictEqual(calls, ['on']);
+        e.T.remove();
+        assert.deepStrictEqual(calls, ['on', 'off']);
+    });
+
+    await test('герой и карточка фильма: стили действуют только с оформлением, ряды окном снизу, афиша убрана', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+        assert.ok(/body\.lw-theme \.lw-hero\{display:none\}/.test(css), 'без lw-home герой скрыт');
+        assert.ok(/body\.lw-theme\.lw-home \.lw-hero\{display:block[^}]*pointer-events:none/.test(css), 'на главной герой виден и не ловит фокус');
+        assert.ok(/body\.lw-theme\.lw-home \.activitys\{margin-top:44vh/.test(css), 'ряды сдвинуты вниз');
+        assert.ok(/body\.lw-theme\.lw-home \.lw-hero__img\{[^}]*opacity:0;transition:opacity/.test(css), 'смена кадра только через opacity');
+        assert.ok(/body\.lw-theme \.full-start-new__left\{display:none\}/.test(css), 'афиша на странице фильма убрана');
+        assert.ok(!/\.lw-hero[^{]*\{[^}]*(backdrop-filter|filter:blur|width\s*:[^;}]*transition)/.test(css), 'в герое нет размытия');
+        assert.ok(!/lw-hero[^{]*\{[^}]*transition:[^;}]*(width|height|top|left)/.test(css), 'в герое нет анимации размеров');
+    });
+
     await test('четыре функции: у окон плагина нет белой заливки и анимаций размеров', () => {
         const health = fs.readFileSync(path.join(SRC, 'health.js'), 'utf8');
         const watch = fs.readFileSync(path.join(SRC, 'watch.js'), 'utf8');
