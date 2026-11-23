@@ -280,6 +280,29 @@ async function test(name, fn) {
         });
     });
 
+    await test('поиск и окно ввода: клавиши, чипсы, источники и микрофон без белой заливки, окно ввода чёрное', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+        const rule = (sel) => {
+            const i = css.indexOf(sel + '{');
+
+            assert.ok(i >= 0, 'есть правило ' + sel);
+
+            return css.slice(i, css.indexOf('}', i));
+        };
+
+        // всё, что Лампа красит белым при выборе в поиске, перекрыто рамкой акцента
+        ['body.lw-theme .simple-keyboard .hg-button.hg-activeButton,body.lw-theme .simple-keyboard .hg-button.focus,body.lw-theme .simple-keyboard .hg-button:hover',
+            'body.lw-theme .search-history-key.focus,body.lw-theme .search-source.focus,body.lw-theme .search-source.active.focus',
+            'body.lw-theme .simple-keyboard-mic.focus',
+            'body.lw-theme .simple-keyboard-buttons__enter:hover,body.lw-theme .simple-keyboard-buttons__cancel:hover',
+            'body.lw-theme .settings-input__links.focus'].forEach((sel) => {
+            assert.ok(/box-shadow:inset 0 0 0 \.09em var\(--edge\)/.test(rule(sel)), 'выбор с рамкой акцента: ' + sel);
+        });
+
+        assert.ok(/linear-gradient/.test(rule('body.lw-theme .search-source.active')), 'активный источник: градиент акцента, а не белая заливка');
+        assert.ok(/background:#000!important/.test(rule('body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content')), 'окно ввода: чистый чёрный');
+    });
+
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));
     const failed = results.filter((r) => !r[0]).length;
 
