@@ -256,20 +256,24 @@ async function test(name, fn) {
         assert.ok(watch.indexOf("'lw-box lw-box--wishes'") >= 0, 'окно пожеланий помечено классом');
     });
 
-    await test('плеер: линия времени и кнопки без белого, размытие Лампы снято на всех плашках плеера', () => {
+    await test('плеер: как в Apple TV, светлая тонкая линия, ползунок только при выборе, светлая кнопка на выбранном, размытие снято', () => {
         const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+        // побеждает последнее правило: оформление 1.5 дописано ниже прежнего
         const rule = (sel) => {
-            const i = css.indexOf(sel + '{');
+            const i = css.lastIndexOf(sel + '{');
 
             assert.ok(i >= 0, 'есть правило ' + sel);
 
             return css.slice(i, css.indexOf('}', i));
         };
 
-        assert.ok(/linear-gradient/.test(rule('body.lw-theme .player-panel__position')), 'позиция времени: градиент акцента, не белая');
-        assert.ok(/box-shadow:0 0 0 \.1em var\(--edge\)/.test(rule('body.lw-theme .player-panel__timeline.focus')), 'выбор линии времени: рамка акцента');
-        assert.ok(/inset/.test(rule('body.lw-theme .player-panel .button.focus,body.lw-theme .player-skip.focus')), 'выбор кнопок плеера: внутренняя рамка');
-        assert.ok(!/color:#000/.test(rule('body.lw-theme .player-skip.focus')), 'у «Пропустить» нет чёрного текста на светлом');
+        assert.ok(/background:var\(--paper\)/.test(rule('body.lw-theme .player-panel__position')), 'прошедшее время: светлая линия');
+        assert.ok(/box-shadow:none/.test(rule('body.lw-theme .player-panel__timeline.focus')), 'выбор линии времени: без рамки, линия толще');
+        assert.ok(/scale\(0\)/.test(rule('body.lw-theme .player-panel__position>div:after')), 'ползунок скрыт, пока линия не выбрана');
+        assert.ok(/scale\(1\.15\)/.test(rule('body.lw-theme .player-panel__timeline.focus .player-panel__position>div:after')), 'ползунок виден на выбранной линии');
+        assert.ok(/background:var\(--paper\)/.test(rule('body.lw-theme .player-panel .button.focus,body.lw-theme .player-panel__playpause.focus')), 'выбранная кнопка светлая');
+        assert.ok(/color:var\(--onpaper\)/.test(rule('body.lw-theme .player-skip.focus')), 'у «Пропустить» тёмный текст на светлом');
+        assert.ok(!/color:#000/.test(rule('body.lw-theme .player-skip.focus')), 'чёрный задан токеном, не литералом');
 
         const blur = css.match(/[^{}]+\{-webkit-backdrop-filter:none!important;backdrop-filter:none!important\}/);
 
@@ -280,7 +284,7 @@ async function test(name, fn) {
         });
     });
 
-    await test('поиск и окно ввода: клавиши, чипсы, источники и микрофон без белой заливки, окно ввода чёрное', () => {
+    await test('поиск и окно ввода: клавиши, чипсы, источники и микрофон без белой заливки, окно ввода графитовое', () => {
         const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
         const rule = (sel) => {
             const i = css.indexOf(sel + '{');
@@ -300,7 +304,7 @@ async function test(name, fn) {
         });
 
         assert.ok(/linear-gradient/.test(rule('body.lw-theme .search-source.active')), 'активный источник: градиент акцента, а не белая заливка');
-        assert.ok(/background:#000!important/.test(rule('body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content')), 'окно ввода: чистый чёрный');
+        assert.ok(/background:var\(--bg2\)!important/.test(rule('body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content')), 'окно ввода: графит');
     });
 
     await test('четыре функции: кнопка «Серия N», запас, плитки диагностики оформлены, без белого и размытия', () => {

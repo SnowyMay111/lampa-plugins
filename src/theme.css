@@ -1,18 +1,18 @@
 /*
  * Тема Lampa Watch (OLED) поверх НАСТОЯЩЕЙ разметки Лампы 3.4.x.
  * Включается классом body.lw-theme; цвет акцента: body.lw-lime (иначе синий).
- * Правила: фон #000, без blur и backdrop-filter, тяжёлые тени только слоем ::after,
+ * Правила: графитовый фон, без blur и backdrop-filter, тяжёлые тени только слоем ::after,
  * анимируем только transform и opacity, белых заливок при выборе нет.
  * Селекторы взяты из app.css Лампы: .head, .wrap__left/.menu__item, .items-line/.card,
  * .full-start-new/.full-start__button, .settings__content/.settings-folder/.settings-param,
  * .selectbox, .modal, .torrent-item, .player-panel, .search__*.
  */
-body.lw-theme{--edge:#8db8ff;--mid:#1d4fe0;--deep:#0a2478;--word:#6aa2ff;--glow:rgba(70,130,255,.55);--soft:rgba(40,95,235,.20);--faint:rgba(40,95,235,.08);--ink:#f2f4f8;--dim:rgba(242,244,248,.62);--line:rgba(255,255,255,.1);--ok:#5fe39a;--warn:#ffd25a;--lag:#ff9d4d;--bad:#ff6b6b;background:#000!important;color:var(--ink)}
-body.lw-theme.lw-lime{--edge:#d9ff4d;--mid:#8bb300;--deep:#3b4d00;--word:#bde600;--glow:rgba(190,235,0,.5);--soft:rgba(165,210,0,.17);--faint:rgba(165,210,0,.07)}
+body.lw-theme{--bg:#0e1218;--bg2:#151c26;--s1:#1b2430;--s2:#26313f;--paper:rgba(246,248,252,.95);--onpaper:#0b1220;--tint:rgba(70,120,255,.17);--edge:#eef2f8;--mid:#1d4fe0;--deep:#0a2478;--word:#7eaeff;--glow:rgba(255,255,255,.22);--soft:rgba(255,255,255,.13);--faint:rgba(255,255,255,.05);--ink:#f2f4f8;--dim:rgba(242,244,248,.66);--line:rgba(255,255,255,.1);--ok:#5fe39a;--warn:#ffd25a;--lag:#ff9d4d;--bad:#ff6b6b;background:var(--bg)!important;color:var(--ink)}
+body.lw-theme.lw-lime{--mid:#8bb300;--deep:#3b4d00;--word:#c5ec3c;--tint:rgba(165,210,0,.13)}
 
 /* ---------- фон: три canvas Лампы убираем, вместо них один статичный градиент ---------- */
 body.lw-theme .background{display:none}
-body.lw-theme #app{background:radial-gradient(48% 46% at 92% 0%,var(--soft),transparent 72%),radial-gradient(40% 40% at 4% 100%,var(--faint),transparent 72%),#000}
+body.lw-theme #app{background:radial-gradient(60% 55% at 86% 0%,var(--tint),transparent 70%),radial-gradient(44% 44% at 0% 100%,var(--tint),transparent 74%),var(--bg)}
 
 /* ---------- общий вид выбранного: тёмное стекло + рамка акцентом, без белой заливки ---------- */
 body.lw-theme .menu__item.focus,body.lw-theme .menu__item.traverse,body.lw-theme .menu__item.hover,
@@ -35,7 +35,7 @@ body.lw-theme .head__action.focus svg,body.lw-theme .head__action.hover svg{colo
 body.lw-theme .head__time-now{font-weight:300;letter-spacing:-.02em}
 
 /* ---------- левое меню ---------- */
-body.lw-theme .wrap__left{background:linear-gradient(90deg,#000 72%,rgba(0,0,0,0))}
+body.lw-theme .wrap__left{background:linear-gradient(90deg,var(--bg) 72%,rgba(14,18,24,0))}
 body.lw-theme .menu__item{border-radius:1em;font-weight:300}
 body.lw-theme .menu__item.focus .menu__ico [stroke],body.lw-theme .menu__item.traverse .menu__ico [stroke],body.lw-theme .menu__item.hover .menu__ico [stroke]{stroke:var(--ink)}
 body.lw-theme .menu__item.focus .menu__ico path[fill],body.lw-theme .menu__item.focus .menu__ico rect[fill],body.lw-theme .menu__item.focus .menu__ico circle[fill],body.lw-theme .menu__item.traverse .menu__ico path[fill],body.lw-theme .menu__item.hover .menu__ico path[fill]{fill:var(--ink)}
@@ -68,7 +68,7 @@ body.lw-theme .full-descr__text.focus{background:none;box-shadow:inset 0 0 0 1px
 
 /* ---------- настройки: правая панель ---------- */
 body.lw-theme .settings__layer{background:rgba(0,0,0,.6);-webkit-backdrop-filter:none;backdrop-filter:none}
-body.lw-theme .settings__content,body.lw-theme.glass--style .settings__content{background:linear-gradient(180deg,var(--faint),#000 40%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border-left:1px solid var(--line)}
+body.lw-theme .settings__content,body.lw-theme.glass--style .settings__content{background:linear-gradient(180deg,var(--faint),var(--bg2) 40%),var(--bg2)!important;-webkit-backdrop-filter:none;backdrop-filter:none;border-left:1px solid var(--line)}
 body.lw-theme .settings__title{font-weight:300;letter-spacing:-.02em}
 body.lw-theme .settings-folder,body.lw-theme .settings-param{border-radius:1em}
 body.lw-theme .settings-param__value{color:var(--word)}
@@ -78,7 +78,7 @@ body.lw-theme .settings-param__descr{color:var(--dim)}
 body.lw-theme .selectbox__layer,body.lw-theme .modal{-webkit-backdrop-filter:none;backdrop-filter:none}
 body.lw-theme .selectbox__layer{background:rgba(0,0,0,.6)}
 body.lw-theme .modal{background:rgba(0,0,0,.72)}
-body.lw-theme .selectbox__content,body.lw-theme .modal__content,body.lw-theme.glass--style .selectbox__content,body.lw-theme.glass--style .modal__content{background:linear-gradient(155deg,var(--soft),#000 55%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border:1px solid rgba(255,255,255,.09);border-radius:1.4em}
+body.lw-theme .selectbox__content,body.lw-theme .modal__content,body.lw-theme.glass--style .selectbox__content,body.lw-theme.glass--style .modal__content{background:linear-gradient(155deg,var(--soft),var(--bg2) 55%),var(--bg2)!important;-webkit-backdrop-filter:none;backdrop-filter:none;border:1px solid rgba(255,255,255,.09);border-radius:1.4em}
 body.lw-theme .selectbox__title,body.lw-theme .modal__title{font-weight:300;letter-spacing:-.02em}
 body.lw-theme .selectbox-item{border-radius:1em}
 body.lw-theme .selectbox-item__subtitle{color:var(--dim)}
@@ -232,8 +232,8 @@ body.lw-theme .simple-keyboard-buttons__enter{background:linear-gradient(120deg,
 body.lw-theme .simple-keyboard-buttons__enter:hover,body.lw-theme .simple-keyboard-buttons__cancel:hover{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}
 
 /* ---------- окно ввода текста (настройки, «Уточнить поиск») ---------- */
-body.lw-theme .settings-input--free{background:radial-gradient(48% 46% at 92% 0%,var(--soft),transparent 72%),#000}
-body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content{background:#000!important;border-left:1px solid var(--line)}
+body.lw-theme .settings-input--free{background:radial-gradient(48% 46% at 92% 0%,var(--tint),transparent 72%),var(--bg)}
+body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content{background:var(--bg2)!important;border-left:1px solid var(--line)}
 body.lw-theme .settings-input--free .settings-input__content,body.lw-theme.glass--style .settings-input--free .settings-input__content{background:none!important;border-left:0}
 body.lw-theme .settings-input__title{font-weight:300;letter-spacing:-.02em;color:var(--dim)}
 body.lw-theme .settings-input__input{font-weight:300;letter-spacing:-.03em;border-bottom-color:var(--line)}
@@ -256,6 +256,34 @@ body.lw-theme .lw-reserve b{display:block;margin-bottom:.2em;font-size:1.15em;fo
 body.lw-theme .lw-big{font-size:7em;font-weight:200;letter-spacing:-.06em;line-height:1;margin:0 0 .15em;color:var(--ink)}
 body.lw-theme .lw-big small{font-size:.35em;letter-spacing:0;color:var(--word);opacity:1}
 body.lw-theme .lw-cards--three .lw-card{flex:1 1 0;min-width:0}
+
+/* ---------- 1.5: графит и стиль Apple: светлее фон, плитки сплошные, выбранное увеличивается и светлеет ---------- */
+body.lw-theme .lw-row,body.lw-theme .lw-item,body.lw-theme .lw-card,body.lw-theme .lw-prow,body.lw-theme .lw-tc,body.lw-theme .lw-dgc,body.lw-theme .torrent-item,body.lw-theme .lw-note{background:var(--s1);border-color:rgba(255,255,255,.07)}
+body.lw-theme .full-start__button,body.lw-theme .modal__button,body.lw-theme .simple-button,body.lw-theme .lw-watch-btn,body.lw-theme .lw-tool,body.lw-theme .lw-more{background:rgba(255,255,255,.12);border-color:transparent;color:var(--ink)}
+body.lw-theme .full-start__button.button--play,body.lw-theme .lw-next-btn,body.lw-theme .modal__button:first-child{background:linear-gradient(120deg,var(--deep),var(--mid));border-color:transparent}
+body.lw-theme .full-start__button,body.lw-theme .modal__button,body.lw-theme .simple-button,body.lw-theme .head__action,body.lw-theme .player-panel .button{transition:transform .18s}
+body.lw-theme .full-start__button.focus,body.lw-theme .full-start__button.button--play.focus,body.lw-theme .lw-watch-btn.focus,body.lw-theme .lw-next-btn.focus,body.lw-theme .modal__button.focus,body.lw-theme .modal__button:first-child.focus,body.lw-theme .simple-button.focus,body.lw-theme .head__action.focus,body.lw-theme .head__action.hover{background:var(--paper);color:var(--onpaper);box-shadow:none;border-color:transparent;transform:scale(1.05)}
+body.lw-theme .full-start__button.focus svg,body.lw-theme .lw-watch-btn.focus svg,body.lw-theme .lw-next-btn.focus svg,body.lw-theme .modal__button.focus svg,body.lw-theme .simple-button.focus svg,body.lw-theme .head__action.focus svg,body.lw-theme .head__action.hover svg{color:var(--onpaper)}
+body.lw-theme .card__view{transition:transform .2s}
+body.lw-theme .card.focus .card__view,body.lw-theme .card.hover .card__view{transform:scale(1.07)}
+body.lw-theme .card.focus .card__view::after,body.lw-theme .card.hover .card__view::after{border:.16em solid var(--edge);border-radius:1.3em;top:-.16em;left:-.16em;right:-.16em;bottom:-.16em;box-shadow:none}
+
+/* ---------- 1.5: плеер как в Apple TV: тонкая белая линия, ползунок только при выборе, круглые стеклянные кнопки ---------- */
+body.lw-theme .player-video__overlay{background:linear-gradient(180deg,rgba(0,0,0,.72),rgba(0,0,0,0) 26%,rgba(0,0,0,0) 52%,rgba(0,0,0,.9))}
+body.lw-theme .player-info__title{font-size:2.4em;font-weight:600;letter-spacing:-.03em}
+body.lw-theme .player-panel__timeline{height:.4em;border-radius:1em;background:rgba(255,255,255,.26)}
+body.lw-theme .player-panel__peding{background:rgba(255,255,255,.34);border-radius:1em}
+body.lw-theme .player-panel__position{background:var(--paper);border-radius:1em}
+body.lw-theme .player-panel__position>div:after{background-color:var(--paper);transform:translateY(-50%) translateX(50%) scale(0);transition:transform .18s}
+body.lw-theme .player-panel__timeline.focus{box-shadow:none;height:.62em}
+body.lw-theme .player-panel__timeline.focus .player-panel__position>div:after{transform:translateY(-50%) translateX(50%) scale(1.15)}
+body.lw-theme .player-panel__box-buttons{background:none;box-shadow:none}
+body.lw-theme .player-panel .button{background:rgba(255,255,255,.14);border-radius:50%}
+body.lw-theme .player-panel .button.focus,body.lw-theme .player-panel__playpause.focus{background:var(--paper);color:var(--onpaper);box-shadow:none;transform:scale(1.1)}
+body.lw-theme .player-panel .button.focus svg,body.lw-theme .player-panel__playpause.focus svg{color:var(--onpaper);fill:currentColor}
+body.lw-theme .player-panel__playpause,body.lw-theme .player-panel__playpause:not(.focus){background:var(--paper);color:var(--onpaper);border:0}
+body.lw-theme .player-panel__playpause svg{color:var(--onpaper)}
+body.lw-theme .player-skip.focus{background:var(--paper);color:var(--onpaper)}
 
 /* ---------- защита OLED ---------- */
 body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}
