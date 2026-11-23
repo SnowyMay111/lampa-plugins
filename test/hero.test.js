@@ -146,6 +146,22 @@ async function test(name, fn) {
         assert.strictEqual(e.doc.querySelector('.lw-hero__title').textContent, 'Сердце зверя', 'тексты не тронуты');
     });
 
+    await test('разделы с рядами (Фильмы, Сериалы, Мультфильмы) тоже получают героя, а сетки и поиск нет', async () => {
+        const e = makeEnv();
+
+        e.H.on();
+        e.state.component = 'category';
+        assert.strictEqual(e.H.isHome(), true);
+        e.U.cardImgBackground(movie);
+        await sleep(30);
+        assert.strictEqual(e.doc.querySelector('.lw-hero__title').textContent, 'Сердце зверя');
+
+        ['category_full', 'favorite', 'full', 'actor', 'search'].forEach((c) => {
+            e.state.component = c;
+            assert.strictEqual(e.H.isHome(), false, c);
+        });
+    });
+
     await test('событие activity: класс возвращается, когда снова открыта главная', async () => {
         const e = makeEnv();
 

@@ -349,6 +349,14 @@ async function test(name, fn) {
         assert.ok(!/lw-hero[^{]*\{[^}]*transition:[^;}]*(width|height|top|left)/.test(css), 'в герое нет анимации размеров');
     });
 
+    await test('страница фильма: ряды под первым экраном на подложке, шапка с тенью сверху, всё без размытия', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+        assert.ok(/body\.lw-theme \.full-start-new ~ \.items-line\{background:rgba\(14,18,24,\.9/.test(css), 'ряды под кадром на подложке');
+        assert.ok(/body\.lw-theme \.head\{background:linear-gradient\(180deg,rgba\(14,18,24,\.\d+\),rgba\(14,18,24,0\)\)\}/.test(css), 'у шапки градиент сверху');
+        assert.ok(!/\.full-start-new ~[^{]*\{[^}]*(backdrop-filter|blur\()/.test(css), 'на подложке нет размытия');
+    });
+
     await test('четыре функции: у окон плагина нет белой заливки и анимаций размеров', () => {
         const health = fs.readFileSync(path.join(SRC, 'health.js'), 'utf8');
         const watch = fs.readFileSync(path.join(SRC, 'watch.js'), 'utf8');

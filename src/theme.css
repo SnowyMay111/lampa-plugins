@@ -28,7 +28,6 @@ body.lw-theme .modal__button.focus,
 body.lw-theme .player-panel .button.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.04) 70%);color:var(--ink);box-shadow:inset 0 0 0 1px var(--edge)}
 
 /* ---------- верхняя панель ---------- */
-body.lw-theme .head{background:none}
 body.lw-theme .head__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
 body.lw-theme .head__action,body.lw-theme .head__menu-icon,body.lw-theme .head__backward{border-radius:50%}
 body.lw-theme .head__action.focus svg,body.lw-theme .head__action.hover svg{color:var(--ink)}
@@ -308,6 +307,10 @@ body.lw-theme .full-start-new__right{margin-left:0;width:54%}
 body.lw-theme .full-start__background{opacity:1}
 body.lw-theme .full-start-new::before{content:"";position:absolute;left:0;top:-148px;right:0;bottom:-300px;background:linear-gradient(90deg,var(--bg) 6%,rgba(14,18,24,.72) 38%,rgba(14,18,24,0) 72%),linear-gradient(0deg,var(--bg) 4%,rgba(14,18,24,0) 40%);pointer-events:none;z-index:0}
 body.lw-theme .full-start-new__body{position:relative;z-index:1}
+/* ряды под первым экраном (комментарии, сезоны, актёры, похожие) лежат на плотной подложке: кадр сзади не мешает читать */
+body.lw-theme .full-start-new ~ .items-line{background:rgba(14,18,24,.92)}
+/* шапка над кадром и над уезжающим вверх содержимым: мягкая тень сверху, иконки читаются на любом фоне */
+body.lw-theme .head{background:linear-gradient(180deg,rgba(14,18,24,.78),rgba(14,18,24,0))}
 
 /* ---------- защита OLED ---------- */
 body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}
