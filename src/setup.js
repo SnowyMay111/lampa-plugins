@@ -629,10 +629,18 @@ function addSettings() {
     });
 }
 
+// Раздел «Оформление» (бета). Он нужен и тогда, когда TorrServer-настройка недоступна, поэтому вызывается отдельно
+function addThemeSettings() {
+    var api = window.Lampa.SettingsApi;
+
+    if (api && LW.theme) LW.theme.addSettings(api);
+}
+
 function start() {
     try {
         addStyle();
         addSettings();
+        addThemeSettings();
     } catch (e) {
         if (window.console) console.log('[lampa-watch] настройки: ' + e);
     }

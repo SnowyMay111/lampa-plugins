@@ -6,7 +6,16 @@ var fs = require('fs');
 var path = require('path');
 
 var ROOT = __dirname;
-var MODULES = ['speed', 'score', 'list', 'parser', 'tune', 'failover', 'watch', 'setup']; // порядок важен: оценка использует прогноз скорости, окна подбора парсера используют LW.ui из watch
+var MODULES = ['speed', 'score', 'list', 'parser', 'tune', 'failover', 'theme', 'watch', 'setup']; // порядок важен: оценка использует прогноз скорости, окна подбора парсера используют LW.ui из watch, настройки темы добавляет setup
+
+// CSS темы живёт в src/theme.css: убираем комментарии и лишние пробелы и вшиваем в theme.js строкой
+function themeCss() {
+    return fs.readFileSync(path.join(ROOT, 'src', 'theme.css'), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\s+/g, ' ')
+        .replace(/\s*([{};])\s*/g, '$1')
+        .trim();
+}
 
 var manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 var entry = manifest.plugins.filter(function (p) { return p.id === 'lampa_watch'; })[0];
@@ -36,6 +45,11 @@ out.push('');
 
 MODULES.forEach(function (name) {
     var code = fs.readFileSync(path.join(ROOT, 'src', name + '.js'), 'utf8').replace(/\s+$/, '');
+
+    if (name === 'theme') {
+        if (code.indexOf("'__THEME_CSS__'") < 0) throw new Error('в theme.js нет метки __THEME_CSS__');
+        code = code.replace("'__THEME_CSS__'", function () { return JSON.stringify(themeCss()); });
+    }
 
     out.push("    run('" + name + "', function (LW) {");
     out.push("        'use strict';");

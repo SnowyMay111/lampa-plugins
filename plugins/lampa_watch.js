@@ -1,5 +1,5 @@
 /*
- * Lampa Watch 1.2.0
+ * Lampa Watch 1.3.0
  * Подбор лучшей раздачи, прогноз «будет ли лагать», автопереключение TorrServer.
  * Файл собран из src/ командой node build.js. Править нужно исходники, а не этот файл.
  */
@@ -9,7 +9,7 @@
     if (window.lampa_watch_bundle) return;
     window.lampa_watch_bundle = true;
 
-    var LW = { version: '1.2.0' };
+    var LW = { version: '1.3.0' };
 
     // Каждый модуль в своей оболочке: сбой одного не мешает остальным
     function run(name, fn) {
@@ -2400,6 +2400,254 @@
         })();
     });
 
+    run('theme', function (LW) {
+        'use strict';
+
+        /*
+         * Оформление «OLED»: чёрный фон, тёмное стекло вместо белых заливок, без blur и тяжёлых теней.
+         *
+         * Тема лежит поверх настоящей разметки Лампы и включается классом body.lw-theme.
+         * Сам CSS живёт в src/theme.css и при сборке вшивается сюда строкой.
+         * Выпускается как бета: по умолчанию выключено, включается в Настройки → Lampa Watch.
+         *
+         * Страховка: если Лампа с оформлением не дожила до 8 секунд три раза подряд,
+         * оформление выключается само, и Лампа работает как раньше.
+         *
+         * Защита OLED: через N секунд без нажатий плитки приглушаются, через 10 с прячется верхняя строка.
+         */
+        LW.theme = (function () {
+            var CSS = "body.lw-theme{--edge:#8db8ff;--mid:#1d4fe0;--deep:#0a2478;--word:#6aa2ff;--glow:rgba(70,130,255,.55);--soft:rgba(40,95,235,.20);--faint:rgba(40,95,235,.08);--ink:#f2f4f8;--dim:rgba(242,244,248,.62);--line:rgba(255,255,255,.1);background:#000!important;color:var(--ink)}body.lw-theme.lw-lime{--edge:#d9ff4d;--mid:#8bb300;--deep:#3b4d00;--word:#bde600;--glow:rgba(190,235,0,.5);--soft:rgba(165,210,0,.17);--faint:rgba(165,210,0,.07)}body.lw-theme .background{display:none}body.lw-theme #app{background:radial-gradient(48% 46% at 92% 0%,var(--soft),transparent 72%),radial-gradient(40% 40% at 4% 100%,var(--faint),transparent 72%),#000}body.lw-theme .menu__item.focus,body.lw-theme .menu__item.traverse,body.lw-theme .menu__item.hover, body.lw-theme .head__action.focus,body.lw-theme .head__action.hover, body.lw-theme .items-line__more.focus, body.lw-theme .full-start__button.focus, body.lw-theme .simple-button.focus, body.lw-theme .selectbox-item.focus, body.lw-theme .settings-folder.focus, body.lw-theme .settings-param.focus, body.lw-theme .torrent-item.focus, body.lw-theme .modal__button.focus, body.lw-theme .player-panel .button.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.04) 70%);color:var(--ink);box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .head{background:none}body.lw-theme .head__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .head__action,body.lw-theme .head__menu-icon,body.lw-theme .head__backward{border-radius:50%}body.lw-theme .head__action.focus svg,body.lw-theme .head__action.hover svg{color:var(--ink)}body.lw-theme .head__time-now{font-weight:300;letter-spacing:-.02em}body.lw-theme .wrap__left{background:linear-gradient(90deg,#000 72%,rgba(0,0,0,0))}body.lw-theme .menu__item{border-radius:1em;font-weight:300}body.lw-theme .menu__item.focus .menu__ico [stroke],body.lw-theme .menu__item.traverse .menu__ico [stroke],body.lw-theme .menu__item.hover .menu__ico [stroke]{stroke:var(--ink)}body.lw-theme .menu__item.focus .menu__ico path[fill],body.lw-theme .menu__item.focus .menu__ico rect[fill],body.lw-theme .menu__item.focus .menu__ico circle[fill],body.lw-theme .menu__item.traverse .menu__ico path[fill],body.lw-theme .menu__item.hover .menu__ico path[fill]{fill:var(--ink)}body.lw-theme .menu__item.focus .menu__ico>img,body.lw-theme .menu__item.traverse .menu__ico>img,body.lw-theme .menu__item.hover .menu__ico>img{filter:none}body.lw-theme .menu__split{background:var(--line)}body.lw-theme .scroll__body{counter-reset:lwrow}body.lw-theme .items-line__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .items-line__title::before{counter-increment:lwrow;content:counter(lwrow,decimal-leading-zero);margin-right:.8em;color:var(--word)}body.lw-theme .items-line__more{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}body.lw-theme .card__view{border-radius:1.1em}body.lw-theme .card__img{border-radius:1.1em}body.lw-theme .card__vote{background:rgba(0,0,0,.62);border-radius:2em;font-size:1.05em;font-weight:400}body.lw-theme .card__title{font-weight:300;color:var(--ink)}body.lw-theme .card__age{color:var(--dim)}body.lw-theme .card.focus .card__view::after,body.lw-theme .card.hover .card__view::after{border:1px solid var(--edge);border-radius:1.4em;top:-.35em;left:-.35em;right:-.35em;bottom:-.35em;box-shadow:0 0 1.4em var(--glow)}body.lw-theme .full-start__background{opacity:.38}body.lw-theme .full-start-new__title{font-weight:300;letter-spacing:-.035em}body.lw-theme .full-start-new__tagline,body.lw-theme .full-start-new__details{color:var(--dim)}body.lw-theme .full-start__button{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:2em}body.lw-theme .full-start__button.button--play{background:linear-gradient(120deg,var(--deep),var(--mid));border-color:rgba(255,255,255,.18)}body.lw-theme .full-start__button.focus{border-color:transparent}body.lw-theme .full-start__button.button--play.focus{background:linear-gradient(120deg,var(--deep),var(--mid));box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .full-start__rate,body.lw-theme .full-start__status{border-radius:2em}body.lw-theme .full-descr__text{color:var(--dim);font-weight:300}body.lw-theme .full-descr__text.focus{background:none;box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .settings__layer{background:rgba(0,0,0,.6);-webkit-backdrop-filter:none;backdrop-filter:none}body.lw-theme .settings__content,body.lw-theme.glass--style .settings__content{background:linear-gradient(180deg,var(--faint),#000 40%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border-left:1px solid var(--line)}body.lw-theme .settings__title{font-weight:300;letter-spacing:-.02em}body.lw-theme .settings-folder,body.lw-theme .settings-param{border-radius:1em}body.lw-theme .settings-param__value{color:var(--word)}body.lw-theme .settings-param__descr{color:var(--dim)}body.lw-theme .selectbox__layer,body.lw-theme .modal{-webkit-backdrop-filter:none;backdrop-filter:none}body.lw-theme .selectbox__layer{background:rgba(0,0,0,.6)}body.lw-theme .modal{background:rgba(0,0,0,.72)}body.lw-theme .selectbox__content,body.lw-theme .modal__content,body.lw-theme.glass--style .selectbox__content,body.lw-theme.glass--style .modal__content{background:linear-gradient(155deg,var(--soft),#000 55%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border:1px solid rgba(255,255,255,.09);border-radius:1.4em}body.lw-theme .selectbox__title,body.lw-theme .modal__title{font-weight:300;letter-spacing:-.02em}body.lw-theme .selectbox-item{border-radius:1em}body.lw-theme .selectbox-item__subtitle{color:var(--dim)}body.lw-theme .torrent-item{border-radius:1.4em;background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.025) 60%);border:1px solid rgba(255,255,255,.09)}body.lw-theme .torrent-item.focus{border-color:var(--edge)}body.lw-theme .torrent-item__title{font-weight:300}body.lw-theme .torrent-item__seeds span{color:#5fe39a}body.lw-theme .simple-button{border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12)}body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}body.lw-theme.lw-idle .card:not(.focus),body.lw-theme.lw-idle .menu__item:not(.focus),body.lw-theme.lw-idle .items-line__title{opacity:.55}body.lw-theme.lw-idle10 .head{opacity:0}";
+
+            var K = { on: 'lw_theme', accent: 'lw_theme_accent', idle: 'lw_theme_idle', fails: 'lw_theme_fails' };
+            var STYLE_ID = 'lw-theme-css';
+            var MAX_FAILS = 3;     // столько запусков подряд, не дожив до OK_AFTER, выключают оформление
+            var OK_AFTER = 8;      // секунд: после этого запуск считается удачным
+            var HIDE_BAR = 10;     // секунд до скрытия верхней строки
+
+            var TXT = {
+                title: 'Оформление',
+                on: 'Новое оформление (бета)',
+                onDescr: 'Чёрный OLED-вид для всего приложения. По умолчанию выключено. Если Лампа три раза подряд не запустится с ним, оформление выключится само.',
+                accent: 'Цвет акцента',
+                blue: 'Синий',
+                lime: 'Лайм',
+                idle: 'Защита от выгорания',
+                idle60: 'Через 60 секунд',
+                idle30: 'Через 30 секунд',
+                idleOff: 'Выключена',
+                idleDescr: 'Когда долго нет нажатий, плитки приглушаются, а верхняя строка прячется.',
+                autoOff: 'Новое оформление выключено: Лампа три раза подряд не запустилась с ним. Включить снова можно в настройках Lampa Watch.'
+            };
+
+            // Единица времени: 1000 мс. В тестах уменьшается, чтобы не ждать секунды.
+            var api = { tick: 1000 };
+
+            var state = { applied: false, bound: false, idleT: null, barT: null, okT: null, last: 0 };
+
+            function store() {
+                return window.Lampa && window.Lampa.Storage;
+            }
+
+            function read(key, def) {
+                try {
+                    var v = store().get(key, def);
+
+                    return v === undefined || v === '' || v === null ? def : v;
+                } catch (e) {
+                    return def;
+                }
+            }
+
+            function write(key, value) {
+                try { store().set(key, value); } catch (e) { /* хранилище недоступно: живём без него */ }
+            }
+
+            function isOn() {
+                var v = read(K.on, false);
+
+                return v === true || v === 'true';
+            }
+
+            // '60s' → 60, '30s' → 30, 'off' и всё непонятное → 0 (защита выключена)
+            function idleSeconds(value) {
+                var n = parseInt(value, 10);
+
+                return n > 0 ? n : 0;
+            }
+
+            function addStyle() {
+                if (document.getElementById(STYLE_ID)) return;
+
+                var el = document.createElement('style');
+
+                el.id = STYLE_ID;
+                el.textContent = CSS;
+                (document.head || document.documentElement).appendChild(el);
+            }
+
+            function clearTimers() {
+                clearTimeout(state.idleT);
+                clearTimeout(state.barT);
+                state.idleT = state.barT = null;
+            }
+
+            function schedule() {
+                clearTimers();
+
+                var sec = idleSeconds(read(K.idle, '60s'));
+
+                if (!sec || !state.applied) return;
+
+                state.idleT = setTimeout(function () { document.body.classList.add('lw-idle'); }, sec * api.tick);
+                state.barT = setTimeout(function () { document.body.classList.add('lw-idle10'); }, Math.min(HIDE_BAR, sec) * api.tick);
+            }
+
+            function wake() {
+                if (!state.applied) return;
+
+                var cl = document.body.classList;
+                var dim = cl.contains('lw-idle') || cl.contains('lw-idle10');
+                var now = Date.now();
+
+                // мышь шлёт события десятками в секунду: если ничего не приглушено, таймеры пересоздаём не чаще раза в 250 мс
+                if (!dim && now - state.last < 250 * (api.tick / 1000)) return;
+
+                state.last = now;
+
+                if (dim) {
+                    cl.remove('lw-idle');
+                    cl.remove('lw-idle10');
+                }
+
+                schedule();
+            }
+
+            function bind() {
+                if (state.bound) return;
+
+                state.bound = true;
+
+                ['keydown', 'mousemove', 'click', 'touchstart', 'wheel'].forEach(function (name) {
+                    document.addEventListener(name, wake, true);
+                });
+            }
+
+            function apply() {
+                addStyle();
+                state.applied = true;
+
+                var cl = document.body.classList;
+
+                cl.add('lw-theme');
+                cl.toggle('lw-lime', read(K.accent, 'blue') === 'lime');
+                bind();
+                schedule();
+            }
+
+            function remove() {
+                state.applied = false;
+                clearTimers();
+                document.body.classList.remove('lw-theme', 'lw-lime', 'lw-idle', 'lw-idle10');
+            }
+
+            // Привести вид в соответствие с настройками (после переключателя в Настройках)
+            function refresh() {
+                if (isOn()) apply();
+                else remove();
+            }
+
+            function notify(text) {
+                try {
+                    if (window.Lampa && window.Lampa.Noty) window.Lampa.Noty.show(text);
+                } catch (e) { /* уведомление не обязательно */ }
+            }
+
+            function start() {
+                if (!isOn()) return;
+
+                var fails = parseInt(read(K.fails, 0), 10) || 0;
+
+                if (fails >= MAX_FAILS) {
+                    write(K.on, false);
+                    write(K.fails, 0);
+                    notify(TXT.autoOff);
+
+                    return;
+                }
+
+                write(K.fails, fails + 1);
+                apply();
+
+                // дожили до OK_AFTER: запуск удачный, счётчик сбоев обнуляем
+                state.okT = setTimeout(function () { write(K.fails, 0); }, OK_AFTER * api.tick);
+            }
+
+            function addSettings(settingsApi) {
+                var c = 'lampa_watch';
+
+                settingsApi.addParam({ component: c, param: { name: 'lw_theme_title', type: 'title' }, field: { name: TXT.title } });
+
+                settingsApi.addParam({
+                    component: c,
+                    param: { name: K.on, type: 'trigger', default: false },
+                    field: { name: TXT.on, description: TXT.onDescr },
+                    onChange: function () { setTimeout(refresh, 30); }
+                });
+
+                var accent = {};
+
+                accent.blue = TXT.blue;
+                accent.lime = TXT.lime;
+
+                settingsApi.addParam({
+                    component: c,
+                    param: { name: K.accent, type: 'select', values: accent, default: 'blue' },
+                    field: { name: TXT.accent },
+                    onChange: function () { setTimeout(refresh, 30); }
+                });
+
+                var idle = {};
+
+                idle['60s'] = TXT.idle60; // ключи не числами, иначе JS переставит их по возрастанию
+                idle['30s'] = TXT.idle30;
+                idle.off = TXT.idleOff;
+
+                settingsApi.addParam({
+                    component: c,
+                    param: { name: K.idle, type: 'select', values: idle, default: '60s' },
+                    field: { name: TXT.idle, description: TXT.idleDescr },
+                    onChange: function () { setTimeout(schedule, 30); }
+                });
+            }
+
+            function boot() {
+                try {
+                    start();
+                } catch (e) {
+                    if (window.console) console.log('[lampa-watch] оформление: ' + e);
+                }
+            }
+
+            if (window.appready) boot();
+            else window.Lampa.Listener.follow('app', function (e) {
+                if (e.type === 'ready') boot();
+            });
+
+            api.start = start;
+            api.apply = apply;
+            api.remove = remove;
+            api.refresh = refresh;
+            api.addSettings = addSettings;
+            api.isOn = isOn;
+            api.idleSeconds = idleSeconds;
+            api.keys = K;
+            api.MAX_FAILS = MAX_FAILS;
+            api.TXT = TXT;
+
+            return api;
+        })();
+    });
+
     run('watch', function (LW) {
         'use strict';
 
@@ -4392,10 +4640,18 @@
             });
         }
 
+        // Раздел «Оформление» (бета). Он нужен и тогда, когда TorrServer-настройка недоступна, поэтому вызывается отдельно
+        function addThemeSettings() {
+            var api = window.Lampa.SettingsApi;
+
+            if (api && LW.theme) LW.theme.addSettings(api);
+        }
+
         function start() {
             try {
                 addStyle();
                 addSettings();
+                addThemeSettings();
             } catch (e) {
                 if (window.console) console.log('[lampa-watch] настройки: ' + e);
             }
