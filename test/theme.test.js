@@ -112,6 +112,23 @@ async function test(name, fn) {
         assert.ok(e.body.classList.contains('lw-idle'), 'плитки приглушены через 30 с');
     });
 
+    await test('пока играет плеер, ничего не приглушается; после закрытия защита возвращается', async () => {
+        const e = makeEnv({ lw_theme: true, lw_theme_idle: '30s' });
+
+        const player = e.doc.createElement('div');
+
+        player.className = 'player';
+        e.body.appendChild(player);
+        e.T.start();
+        await sleep(300);
+        assert.ok(!e.body.classList.contains('lw-idle'), 'плитки не трогаем во время фильма');
+        assert.ok(!e.body.classList.contains('lw-idle10'), 'верхнюю строку тоже');
+
+        player.remove();
+        await sleep(300);
+        assert.ok(e.body.classList.contains('lw-idle'), 'после фильма защита снова работает');
+    });
+
     await test('нажатие кнопки сразу возвращает яркость и перезапускает отсчёт', async () => {
         const e = makeEnv({ lw_theme: true, lw_theme_idle: '30s' });
 
@@ -237,6 +254,30 @@ async function test(name, fn) {
         assert.ok(/body\.lw-theme \.full-start-new__buttons \.lw-watch-btn span\{display:inline\}/.test(css.replace(/\s+/g, ' ').replace(/\s*([{};])\s*/g, '$1')), 'подпись кнопки включена');
         assert.ok(/\.lw-box--wishes\{[^}]*display:grid/.test(css), 'пожелания: сетка');
         assert.ok(watch.indexOf("'lw-box lw-box--wishes'") >= 0, 'окно пожеланий помечено классом');
+    });
+
+    await test('плеер: линия времени и кнопки без белого, размытие Лампы снято на всех плашках плеера', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+        const rule = (sel) => {
+            const i = css.indexOf(sel + '{');
+
+            assert.ok(i >= 0, 'есть правило ' + sel);
+
+            return css.slice(i, css.indexOf('}', i));
+        };
+
+        assert.ok(/linear-gradient/.test(rule('body.lw-theme .player-panel__position')), 'позиция времени: градиент акцента, не белая');
+        assert.ok(/box-shadow:0 0 0 \.1em var\(--edge\)/.test(rule('body.lw-theme .player-panel__timeline.focus')), 'выбор линии времени: рамка акцента');
+        assert.ok(/inset/.test(rule('body.lw-theme .player-panel .button.focus,body.lw-theme .player-skip.focus')), 'выбор кнопок плеера: внутренняя рамка');
+        assert.ok(!/color:#000/.test(rule('body.lw-theme .player-skip.focus')), 'у «Пропустить» нет чёрного текста на светлом');
+
+        const blur = css.match(/[^{}]+\{-webkit-backdrop-filter:none!important;backdrop-filter:none!important\}/);
+
+        assert.ok(blur, 'есть общее правило снятия размытия');
+
+        ['.normalization', '.player-video__paused', '.player-video__loader', '.player-panel__box-buttons', '.player-panel__time', '.player-skip', '.player-chat__body', '.noty--style--glass', '.player-info__values .value--size span'].forEach((sel) => {
+            assert.ok(blur[0].indexOf('body.lw-theme ' + sel) >= 0, 'размытие снято: ' + sel);
+        });
     });
 
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));

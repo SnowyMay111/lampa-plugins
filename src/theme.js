@@ -93,8 +93,18 @@ LW.theme = (function () {
 
         if (!sec || !state.applied) return;
 
-        state.idleT = setTimeout(function () { document.body.classList.add('lw-idle'); }, sec * api.tick);
-        state.barT = setTimeout(function () { document.body.classList.add('lw-idle10'); }, Math.min(HIDE_BAR, sec) * api.tick);
+        arm('idleT', 'lw-idle', sec);
+        arm('barT', 'lw-idle10', Math.min(HIDE_BAR, sec));
+    }
+
+    // Во время фильма приглушать нечего: приложение закрыто плеером, а пересчёт стилей сотен карточек под ним мог бы дать пропуск кадра.
+    // Пока плеер открыт, таймер просто взводится заново. Признак плеера: его блок .player в документе (класса player--viewing Лампа не ставит).
+    function arm(key, cls, sec) {
+        state[key] = setTimeout(function () {
+            if (document.querySelector('.player')) return arm(key, cls, sec);
+
+            document.body.classList.add(cls);
+        }, sec * api.tick);
     }
 
     function wake() {

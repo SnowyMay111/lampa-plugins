@@ -174,6 +174,38 @@ body.lw-theme .lw-prow__info,body.lw-theme .lw-tc__why,body.lw-theme .lw-chg__k{
 body.lw-theme .lw-tc__name{font-weight:400}
 body.lw-theme .lw-chg{border-bottom-color:var(--line)}
 
+/* ---------- плеер: градиенты вместо плашек, тонкая линия времени, круглые кнопки ---------- */
+body.lw-theme .player-video__overlay{background:linear-gradient(180deg,rgba(0,0,0,.78),rgba(0,0,0,0) 28%,rgba(0,0,0,0) 50%,rgba(0,0,0,.94))}
+body.lw-theme .player-video__paused,body.lw-theme .player-video__loader{background-color:rgba(0,0,0,.45);border:1px solid var(--line)}
+body.lw-theme .player-info__title{font-size:2.6em;font-weight:300;letter-spacing:-.035em}
+body.lw-theme .player-info__name,body.lw-theme .player-info__values{color:var(--dim)}
+body.lw-theme .player-info__time span,body.lw-theme .player-panel__timenow,body.lw-theme .player-panel__timeend{font-weight:300;font-variant-numeric:tabular-nums}
+body.lw-theme .player-info__time-end{color:var(--dim)}
+body.lw-theme .player-info__values .value--name span{font-weight:300;color:var(--ink)}
+body.lw-theme .player-info__values .value--size span{border:1px solid var(--line);background:none;color:var(--ink)}
+body.lw-theme .player-info__values .value--pieces span.active{background-color:var(--edge)}
+body.lw-theme .player-info__values .value--pieces span.red{background-color:var(--bad)}
+body.lw-theme .player-info__values .value--pieces span.yellow{background-color:var(--warn)}
+body.lw-theme .player-info__values .value--pieces span.green{background-color:var(--ok)}
+body.lw-theme .player-panel__timeline{height:.3em;background-color:rgba(255,255,255,.14)}
+body.lw-theme .player-panel__peding{background-color:rgba(255,255,255,.3)}
+body.lw-theme .player-panel__position{background:linear-gradient(90deg,var(--mid),var(--edge))}
+body.lw-theme .player-panel__position>div:after{display:block;background-color:var(--edge);transform:translateY(-50%) translateX(50%) scale(.8)}
+body.lw-theme .player-panel__timeline.focus{box-shadow:0 0 0 .1em var(--edge)}
+body.lw-theme .player-panel__time{background:rgba(0,0,0,.75);border:1px solid var(--line);color:var(--ink)}
+body.lw-theme .player-panel__box-buttons{background:rgba(255,255,255,.07);box-shadow:inset 0 0 0 1px var(--line)}
+body.lw-theme .player-panel .button.focus,body.lw-theme .player-skip.focus{box-shadow:inset 0 0 0 .09em var(--edge)}
+body.lw-theme .player-panel__playpause{background:linear-gradient(120deg,var(--deep),var(--mid));border:1px solid rgba(255,255,255,.18)}
+body.lw-theme .player-panel__playpause:not(.focus){background:linear-gradient(120deg,var(--deep),var(--mid))}
+body.lw-theme .player-panel__playpause.focus{background:linear-gradient(120deg,var(--deep),var(--mid))}
+body.lw-theme .player-panel__quality{font-weight:300}
+body.lw-theme .player-skip{background:rgba(0,0,0,.6);border:1px solid var(--line)}
+body.lw-theme .player-skip.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.05) 70%);color:var(--ink)}
+body.lw-theme .player-skip__progress-line{background-color:var(--edge)}
+body.lw-theme .player-footer-card__title{font-weight:300}
+/* остатки размытия Лампы: на ТВ и в браузере тормозят, на OLED не нужны */
+body.lw-theme .normalization,body.lw-theme .player-video__paused,body.lw-theme .player-video__loader,body.lw-theme .player-video__noise-text,body.lw-theme .player-panel__time,body.lw-theme .player-skip,body.lw-theme .player-chat__body,body.lw-theme .player-panel__box-buttons,body.lw-theme .player-panel__playpause,body.lw-theme .player-info__values .value--size span,body.lw-theme .noty--style--glass,body.lw-theme .settings-input__content,body.lw-theme .settings-input--free,body.lw-theme .navigation-bar__body,body.lw-theme .discuss-rules,body.lw-theme .bell__item,body.lw-theme .media-loading__status,body.lw-theme .card .card__icons-inner,body.lw-theme .card .card__marker,body.lw-theme .card .card-watched,body.lw-theme .head__action{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+
 /* ---------- защита OLED ---------- */
 body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}
 body.lw-theme.lw-idle .card:not(.focus),body.lw-theme.lw-idle .menu__item:not(.focus),body.lw-theme.lw-idle .items-line__title{opacity:.55}
