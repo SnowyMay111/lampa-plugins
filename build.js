@@ -6,7 +6,7 @@ var fs = require('fs');
 var path = require('path');
 
 var ROOT = __dirname;
-var MODULES = ['speed', 'score', 'list', 'parser', 'tune', 'failover', 'theme', 'watch', 'setup']; // порядок важен: оценка использует прогноз скорости, окна подбора парсера используют LW.ui из watch, настройки темы добавляет setup
+var MODULES = ['health', 'speed', 'score', 'series', 'list', 'parser', 'tune', 'failover', 'theme', 'watch', 'setup']; // порядок важен: журнал ошибок (health) нужен всем, оценка использует прогноз скорости, окна подбора парсера используют LW.ui из watch, настройки темы добавляет setup
 
 // CSS темы живёт в src/theme.css: убираем комментарии и лишние пробелы и вшиваем в theme.js строкой
 function themeCss() {
@@ -36,10 +36,15 @@ out.push('    if (window.lampa_watch_bundle) return;');
 out.push('    window.lampa_watch_bundle = true;');
 out.push('');
 out.push("    var LW = { version: '" + entry.version + "' };");
+out.push('    // адрес, с которого загружен файл: диагностика показывает его человеку (currentScript есть только пока файл выполняется)');
+out.push("    try { LW.src = (document.currentScript && document.currentScript.src) || ''; } catch (e) { LW.src = ''; }");
 out.push('');
 out.push('    // Каждый модуль в своей оболочке: сбой одного не мешает остальным');
 out.push('    function run(name, fn) {');
-out.push('        try { fn(LW); } catch (e) { if (window.console) console.log("[lampa-watch] модуль " + name + ": " + e); }');
+out.push('        try { fn(LW); } catch (e) {');
+out.push('            if (window.console) console.log("[lampa-watch] модуль " + name + ": " + e);');
+out.push('            if (LW.health) LW.health.note("module", "Модуль " + name + " не запустился: " + e);');
+out.push('        }');
 out.push('    }');
 out.push('');
 

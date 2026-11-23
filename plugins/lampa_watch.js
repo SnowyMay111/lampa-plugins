@@ -1,5 +1,5 @@
 /*
- * Lampa Watch 1.3.3
+ * Lampa Watch 1.4.0
  * Подбор лучшей раздачи, прогноз «будет ли лагать», автопереключение TorrServer.
  * Файл собран из src/ командой node build.js. Править нужно исходники, а не этот файл.
  */
@@ -9,12 +9,601 @@
     if (window.lampa_watch_bundle) return;
     window.lampa_watch_bundle = true;
 
-    var LW = { version: '1.3.3' };
+    var LW = { version: '1.4.0' };
+    // адрес, с которого загружен файл: диагностика показывает его человеку (currentScript есть только пока файл выполняется)
+    try { LW.src = (document.currentScript && document.currentScript.src) || ''; } catch (e) { LW.src = ''; }
 
     // Каждый модуль в своей оболочке: сбой одного не мешает остальным
     function run(name, fn) {
-        try { fn(LW); } catch (e) { if (window.console) console.log("[lampa-watch] модуль " + name + ": " + e); }
+        try { fn(LW); } catch (e) {
+            if (window.console) console.log("[lampa-watch] модуль " + name + ": " + e);
+            if (LW.health) LW.health.note("module", "Модуль " + name + " не запустился: " + e);
+        }
     }
+
+    run('health', function (LW) {
+        'use strict';
+
+        /*
+         * Диагностика и обновление.
+         *
+         * Окно в Настройки → Lampa Watch → «Диагностика и обновление»: версия плагина и есть ли новее,
+         * откуда он загружен, отвечает ли парсер, жив ли TorrServer, последние ошибки и плавность интерфейса.
+         * Каждый пункт показан значком, словом и цветом: цвет один не должен быть единственным признаком.
+         *
+         * Журнал ошибок (note) живёт здесь же: остальные модули пишут в него одной строкой.
+         * Окно собирается из LW.ui, которое появляется позже (watch.js), поэтому берём его в момент открытия.
+         */
+        LW.health = (function () {
+            var STORE_ERRORS = 'lw_diag_errors';
+            var STORE_LAST = 'lw_diag_last';
+            var MAX_ERRORS = 12;
+            var DAY = 24 * 3600 * 1000;
+            var MANIFEST_URL = 'https://snowymay111.github.io/lampa-plugins/manifest.json';
+            var CFG = window.lampa_watch_config || {};
+            var FPS_MS = CFG.fpsMs || 2000;
+            var NET_MS = CFG.healthNetMs || 8000;
+
+            var RANK = { ok: 0, warn: 1, bad: 2 };
+            var MARK = { ok: '✓', warn: '!', bad: '✕', run: '…' };
+            var WORD = { ok: 'Работает', warn: 'Внимание', bad: 'Проблема', run: 'Проверяю' };
+
+            var TXT = {
+                title: 'Диагностика',
+                kicker: 'Настройки · Lampa Watch',
+                recheck: 'Проверить заново',
+                close: 'Закрыть',
+                setting: 'Диагностика и обновление',
+                settingHint: 'Версия плагина, парсер, TorrServer, последние ошибки и плавность интерфейса.',
+                allGood: 'всё в порядке',
+                someWarn: 'есть замечания',
+                someBad: 'есть проблемы',
+                notChecked: 'нажмите, чтобы проверить',
+                version: 'Версия плагина',
+                source: 'Откуда загружен',
+                parser: 'Парсер',
+                server: 'TorrServer',
+                perf: 'Плавность интерфейса',
+                errors: 'Последние ошибки',
+                noErrors: 'Ошибок нет',
+                noErrorsSub: 'Если что-то сломается, причина появится здесь, вместе с тем, что плагин сделал сам.'
+            };
+
+            // ---------------------------------------------------------------- вспомогательное
+
+            function L() {
+                return window.Lampa;
+            }
+
+            function now() {
+                return new Date().getTime();
+            }
+
+            function store(key, value) {
+                try { L().Storage.set(key, value); } catch (e) {}
+            }
+
+            function readStore(key, def) {
+                try { return L().Storage.get(key, def); } catch (e) { return def; }
+            }
+
+            function plural(n, one, few, many) {
+                var a = Math.abs(n) % 100;
+                var b = a % 10;
+
+                if (a > 10 && a < 20) return many;
+                if (b > 1 && b < 5) return few;
+
+                return b === 1 ? one : many;
+            }
+
+            function comma(x) {
+                return String(x).replace('.', ',');
+            }
+
+            function p2(n) {
+                return (n < 10 ? '0' : '') + n;
+            }
+
+            // «21:40», «вчера, 21:40», «12.11, 09:05»
+            function whenText(ts, at) {
+                var cur = at || now();
+                var d = new Date(ts);
+                var t = p2(d.getHours()) + ':' + p2(d.getMinutes());
+                var a = new Date(cur);
+                var today = new Date(a.getFullYear(), a.getMonth(), a.getDate()).getTime();
+
+                if (ts >= today) return 'сегодня, ' + t;
+                if (ts >= today - DAY) return 'вчера, ' + t;
+
+                return p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + ', ' + t;
+            }
+
+            // 1.3.10 новее, чем 1.3.9; нечисловые хвосты отбрасываем
+            function cmpVer(a, b) {
+                var x = String(a || '0').split('.');
+                var y = String(b || '0').split('.');
+                var n = Math.max(x.length, y.length);
+
+                for (var i = 0; i < n; i++) {
+                    var p = parseInt(x[i], 10) || 0;
+                    var q = parseInt(y[i], 10) || 0;
+
+                    if (p !== q) return p > q ? 1 : -1;
+                }
+
+                return 0;
+            }
+
+            function worst(levels) {
+                var out = 'ok';
+
+                levels.forEach(function (l) {
+                    if (RANK[l] > RANK[out]) out = l;
+                });
+
+                return out;
+            }
+
+            // ---------------------------------------------------------------- журнал ошибок
+
+            function errors() {
+                var list = readStore(STORE_ERRORS, []);
+
+                return Object.prototype.toString.call(list) === '[object Array]' ? list : [];
+            }
+
+            // kind: откуда (parser, speed, tune, module), text: что случилось, fix: что плагин сделал сам (необязательно)
+            function note(kind, text, fix) {
+                try {
+                    var list = errors();
+                    var last = list[0];
+                    var t = now();
+
+                    text = String(text || '').slice(0, 200);
+
+                    if (!text) return;
+
+                    if (last && last.kind === kind && last.text === text && t - last.at < 600000) {
+                        if (fix && !last.fix) last.fix = String(fix).slice(0, 200);
+                        else return;
+                    } else {
+                        list.unshift({ at: t, kind: kind, text: text, fix: fix ? String(fix).slice(0, 200) : '' });
+                    }
+
+                    store(STORE_ERRORS, list.slice(0, MAX_ERRORS));
+                } catch (e) {}
+            }
+
+            function clearErrors() {
+                store(STORE_ERRORS, []);
+            }
+
+            function errorsCard(at) {
+                var list = errors();
+                var t = at || now();
+
+                if (!list.length) return { level: 'ok', value: TXT.noErrors, sub: TXT.noErrorsSub };
+
+                var e = list[0];
+                var recent = list.filter(function (x) { return t - x.at < DAY; }).length;
+
+                return {
+                    level: t - e.at < DAY ? 'warn' : 'ok',
+                    value: e.text + ' (' + whenText(e.at, t) + ')',
+                    sub: (e.fix || 'Сделать ничего не нужно, если сейчас всё работает') + (recent > 1 ? '. За сутки таких записей: ' + recent : '')
+                };
+            }
+
+            // ---------------------------------------------------------------- откуда загружен плагин
+
+            var RE_SHORT = /snowymay111\.github\.io\/l\.js(?:[?#]|$)/i;
+            var RE_FULL = /snowymay111\.github\.io\/lampa-plugins\/loader\.js(?:[?#]|$)/i;
+            var RE_OLD = /jsdelivr[^ ]*(?:lampa-torrserver-failover|torrserver[_-]failover)|torrserver[_-]failover[^/]*\.js/i;
+
+            // urls: ссылки из списка расширений Лампы, src: адрес самого файла плагина, loader: сработал ли загрузчик
+            function classify(urls, src, loader) {
+                var list = (urls || []).map(String);
+                var old = list.filter(function (u) { return RE_OLD.test(u); });
+                var kind = list.some(function (u) { return RE_SHORT.test(u); }) ? 'short'
+                    : list.some(function (u) { return RE_FULL.test(u); }) ? 'full'
+                    : (loader ? 'loader' : (/lampa_watch\.js/.test(src || '') ? 'direct' : 'unknown'));
+                var NAME = { short: 'Короткая ссылка', full: 'Полная ссылка', loader: 'Загрузчик', direct: 'Прямая ссылка на файл', unknown: 'Не удалось определить' };
+                var SUB = {
+                    short: 'snowymay111.github.io/l.js · обновляется само',
+                    full: 'lampa-plugins/loader.js · обновляется само',
+                    loader: 'Загрузчик подключён · обновляется само',
+                    direct: 'Файл подключён напрямую: сам он не обновится. Лучше добавить короткую ссылку из README',
+                    unknown: 'Плагин работает, но откуда он взят, определить не вышло'
+                };
+                var level = kind === 'direct' || kind === 'unknown' ? 'warn' : 'ok';
+                var sub = SUB[kind];
+
+                if (old.length) {
+                    level = 'warn';
+                    sub += '. Есть старая ссылка (' + old.length + '): удалите её в Расширениях, иначе заработает старая версия';
+                }
+
+                return { level: level, kind: kind, old: old.length, value: NAME[kind], sub: sub };
+            }
+
+            function pluginUrls() {
+                var out = [];
+
+                try {
+                    var list = L().Storage.get('plugins', '[]');
+
+                    if (typeof list === 'string') list = JSON.parse(list);
+
+                    (list || []).forEach(function (p) {
+                        if (p && p.url) out.push(p.url);
+                    });
+                } catch (e) {}
+
+                return out;
+            }
+
+            function sourceCard() {
+                return classify(pluginUrls(), LW.src || '', !!window.lampa_plugins_loader);
+            }
+
+            // ---------------------------------------------------------------- версия
+
+            function versionResult(local, remote) {
+                if (!remote) return { level: 'warn', value: local, sub: 'Проверить, есть ли новая версия, не вышло: нет связи с сайтом обновлений' };
+
+                var c = cmpVer(remote, local);
+
+                if (c > 0) return { level: 'warn', value: local, sub: 'Вышла версия ' + remote + '. Перезапустите Лампу, обновление подхватится само', latest: remote };
+                if (c < 0) return { level: 'ok', value: local, sub: 'Это версия новее опубликованной (' + remote + ')', latest: remote };
+
+                return { level: 'ok', value: local, sub: 'Последняя: ' + remote + '. Обновление не нужно', latest: remote };
+            }
+
+            function fetchLatest(done) {
+                var net;
+                var finished = false;
+                var timer;
+
+                function end(v) {
+                    if (finished) return;
+
+                    finished = true;
+                    clearTimeout(timer);
+                    done(v);
+                }
+
+                try {
+                    net = new (L().Reguest)();
+                    net.timeout(NET_MS);
+                } catch (e) {
+                    return end('');
+                }
+
+                timer = setTimeout(function () {
+                    try { net.clear(); } catch (e) {}
+                    end('');
+                }, NET_MS + 1500);
+
+                try {
+                    net.native(MANIFEST_URL + '?t=' + now(), function (json) {
+                        var list = (json && json.plugins) || [];
+                        var me = list.filter(function (p) { return p && p.id === 'lampa_watch'; })[0];
+
+                        end(me && me.version ? String(me.version) : '');
+                    }, function () { end(''); });
+                } catch (e) {
+                    end('');
+                }
+            }
+
+            // ---------------------------------------------------------------- парсер и TorrServer
+
+            function parserCheck(done) {
+                var P = LW.parser;
+
+                if (!P) return done({ level: 'warn', value: 'Модуль не загружен', sub: '' });
+
+                var label = P.currentLabel();
+                var cands = [];
+
+                try { cands = P.candidates(P.readCurrent(), P.torrUrl(), []).filter(function (c) { return c.current; }); } catch (e) {}
+
+                if (!cands.length) return done({ level: 'bad', value: label, sub: 'Парсер не настроен. В настройках есть кнопка «Подобрать парсер»: она всё сделает сама' });
+
+                P.probe(cands[0], P.PROBE_QUERY, function (res) {
+                    var sec = comma(Math.round(res.ms / 100) / 10);
+
+                    if (!res.ok) return done({ level: 'bad', value: label, sub: 'Не ответил (' + (res.error || 'нет ответа') + '). Кнопка «Подобрать парсер» найдёт рабочий' });
+
+                    var n = res.ev && res.ev.relevant ? res.ev.relevant : 0;
+
+                    if (res.rating < 15) return done({ level: 'warn', value: label, sub: 'Ответил за ' + sec + ' с, но по пробному запросу пусто' });
+
+                    done({
+                        level: res.ms > 5000 ? 'warn' : 'ok',
+                        value: label,
+                        sub: 'Ответил за ' + sec + ' с · ' + n + ' ' + plural(n, 'раздача', 'раздачи', 'раздач') + ' в пробном поиске'
+                    });
+                });
+            }
+
+            function serverCheck(done) {
+                var T = LW.tune;
+
+                if (!T) return done({ level: 'warn', value: 'Модуль не загружен', sub: '' });
+
+                var addr = T.baseUrl();
+
+                if (!addr) return done({ level: 'warn', value: 'Адрес не задан', sub: 'Укажите TorrServer в настройках Лампы, без него торренты не запустятся' });
+
+                var host = LW.parser ? LW.parser.hostOf(addr) : addr;
+                var t0 = now();
+
+                T.load(function (err, cur) {
+                    var ms = now() - t0;
+
+                    if (err) return done({ level: 'bad', value: host, sub: err });
+
+                    var pre = cur.PreloadCache !== undefined ? 'Предзагрузка ' + cur.PreloadCache + '%' : '';
+                    var cache = cur.CacheSize ? 'кеш ' + T.size(cur.CacheSize) : '';
+
+                    done({ level: ms > 2500 ? 'warn' : 'ok', value: host + ' · ' + ms + ' мс', sub: [pre, cache].filter(function (x) { return x; }).join(', ') || 'Отвечает' });
+                });
+            }
+
+            // ---------------------------------------------------------------- плавность
+
+            // Считаем кадры за FPS_MS миллисекунд и долгие задачи (дольше 50 мс). Только по просьбе человека: постоянно считать незачем.
+            function summarizeFrames(stamps, longTasks) {
+                if (stamps.length < 3) return { level: 'warn', value: 'Не удалось измерить', sub: 'Окно было закрыто слишком быстро' };
+
+                var span = stamps[stamps.length - 1] - stamps[0];
+                var fps = span > 0 ? Math.round((stamps.length - 1) * 1000 / span) : 0;
+                var worstMs = 0;
+
+                for (var i = 1; i < stamps.length; i++) worstMs = Math.max(worstMs, stamps[i] - stamps[i - 1]);
+
+                worstMs = Math.round(worstMs);
+
+                var level = fps >= 50 && worstMs < 80 ? 'ok' : fps >= 30 ? 'warn' : 'bad';
+                var tasks = longTasks === null ? '' : ' · долгих задач ' + longTasks;
+
+                return {
+                    level: level,
+                    fps: fps,
+                    worst: worstMs,
+                    value: fps + ' кадров/с',
+                    sub: 'Самый долгий кадр ' + worstMs + ' мс' + tasks + (level === 'ok' ? '' : '. Если интерфейс тормозит, выключите «Оформление» или поставьте «Минимум» анимаций')
+                };
+            }
+
+            function frameCheck(done) {
+                var raf = window.requestAnimationFrame;
+                var stamps = [];
+                var tasks = 0;
+                var observer = null;
+                var started = now();
+
+                if (!raf) return done({ level: 'warn', value: 'Недоступно', sub: 'Браузер не умеет считать кадры' });
+
+                try {
+                    if (window.PerformanceObserver) {
+                        observer = new window.PerformanceObserver(function (list) { tasks += list.getEntries().length; });
+                        observer.observe({ entryTypes: ['longtask'] });
+                    }
+                } catch (e) { observer = null; }
+
+                function frame(ts) {
+                    stamps.push(typeof ts === 'number' ? ts : now());
+
+                    if (now() - started >= FPS_MS) {
+                        if (observer) { try { observer.disconnect(); } catch (e) {} }
+
+                        return done(summarizeFrames(stamps, observer ? tasks : null));
+                    }
+
+                    raf.call(window, frame);
+                }
+
+                raf.call(window, frame);
+            }
+
+            // ---------------------------------------------------------------- итог для строки настроек
+
+            function summaryText(level, version) {
+                return version + ' · ' + (level === 'bad' ? TXT.someBad : level === 'warn' ? TXT.someWarn : TXT.allGood);
+            }
+
+            function lastSummary() {
+                var last = readStore(STORE_LAST, null);
+
+                if (!last || !last.level) return LW.version + ' · ' + TXT.notChecked;
+
+                return summaryText(last.level, LW.version);
+            }
+
+            // ---------------------------------------------------------------- окно
+
+            var token = 0;
+
+            function addStyle() {
+                if (document.getElementById('lw-health-style')) return;
+
+                var css = [
+                    '.lw-dg{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:.6em;margin-top:.9em}',
+                    '.lw-dgc{padding:.7em .9em;border-radius:.6em;background:rgba(255,255,255,.07);min-width:0}',
+                    '.lw-dgc--wide{grid-column:1 / 3}',
+                    '.lw-dgc__l{display:flex;align-items:center;font-size:.8em;letter-spacing:.06em;text-transform:uppercase;opacity:.75}',
+                    '.lw-dgc__v{margin-top:.35em;font-size:1.15em;font-weight:600;word-break:break-word}',
+                    '.lw-dgc__s{margin-top:.25em;font-size:.85em;line-height:1.35;opacity:.7}',
+                    '.lw-hdot{display:inline-block;flex:none;width:1.35em;height:1.35em;margin-right:.55em;border-radius:50%;text-align:center;line-height:1.35em;font-size:.85em;font-style:normal;text-transform:none;letter-spacing:0;color:#000;background:#9aa0a6}',
+                    '.lw-hdot--ok{background:var(--ok,#5fe39a)}',
+                    '.lw-hdot--warn{background:var(--warn,#ffd25a)}',
+                    '.lw-hdot--bad{background:var(--bad,#ff6b6b)}',
+                    '.lw-dgc__w{margin-left:.6em;text-transform:none;letter-spacing:0;opacity:.9}'
+                ].join('\n');
+
+                var el = document.createElement('style');
+
+                el.id = 'lw-health-style';
+                el.appendChild(document.createTextNode(css));
+                document.head.appendChild(el);
+            }
+
+            function cardDom(key, label, wide) {
+                var c = $('<div class="lw-dgc"></div>').attr('data-key', key);
+
+                if (wide) c.addClass('lw-dgc--wide');
+
+                c.append($('<div class="lw-dgc__l"></div>')
+                    .append($('<i class="lw-hdot lw-hdot--run"></i>').text(MARK.run))
+                    .append(document.createTextNode(label))
+                    .append($('<span class="lw-dgc__w"></span>').text(WORD.run)));
+                c.append($('<div class="lw-dgc__v"></div>').text('…'));
+                c.append($('<div class="lw-dgc__s"></div>'));
+
+                return c;
+            }
+
+            function paint(card, r) {
+                var dot = card.find('.lw-hdot');
+
+                dot.attr('class', 'lw-hdot lw-hdot--' + r.level).text(MARK[r.level]);
+                card.find('.lw-dgc__w').text(WORD[r.level]);
+                card.find('.lw-dgc__v').text(r.value || '');
+                card.find('.lw-dgc__s').text(r.sub || '');
+                card.attr('data-level', r.level);
+            }
+
+            // opts: { back: контроллер для возврата, onDone(level) }
+            function openDiag(opts) {
+                opts = opts || {};
+                addStyle();
+
+                var U = LW.ui;
+
+                if (!U) return;
+
+                var box = U.h('div', 'lw-box lw-box--diag');
+                var grid = $('<div class="lw-dg"></div>');
+                var cards = {};
+                var results = {};
+                var left = 0;
+                var closed = false;
+
+                box.append(U.h('div', 'lw-kicker', TXT.kicker));
+                box.append(U.h('div', 'lw-title', TXT.title));
+
+                [['version', TXT.version], ['source', TXT.source], ['parser', TXT.parser], ['server', TXT.server], ['perf', TXT.perf], ['errors', TXT.errors, true]].forEach(function (c) {
+                    cards[c[0]] = cardDom(c[0], c[1], c[2]);
+                    grid.append(cards[c[0]]);
+                });
+
+                box.append(grid);
+
+                function close() {
+                    closed = true;
+                    U.closeModal();
+
+                    if (opts.back) {
+                        try { L().Controller.toggle(opts.back); } catch (e) {}
+                    }
+                }
+
+                function finishOne(key, r, my) {
+                    if (closed || my !== token) return;
+
+                    results[key] = r;
+                    paint(cards[key], r);
+
+                    if (--left > 0) return;
+
+                    var level = worst(Object.keys(results).map(function (k) { return results[k].level; }));
+
+                    store(STORE_LAST, { at: now(), level: level });
+
+                    if (opts.onDone) opts.onDone(level);
+                }
+
+                function run() {
+                    var my = ++token;
+
+                    left = 6;
+                    results = {};
+
+                    Object.keys(cards).forEach(function (k) {
+                        cards[k].attr('data-level', 'run').find('.lw-hdot').attr('class', 'lw-hdot lw-hdot--run').text(MARK.run);
+                        cards[k].find('.lw-dgc__w').text(WORD.run);
+                    });
+
+                    var local = LW.version;
+
+                    finishOne('errors', errorsCard(), my);
+                    finishOne('source', sourceCard(), my);
+
+                    fetchLatest(function (remote) { finishOne('version', versionResult(local, remote), my); });
+                    parserCheck(function (r) { finishOne('parser', r, my); });
+                    serverCheck(function (r) { finishOne('server', r, my); });
+                    frameCheck(function (r) { finishOne('perf', r, my); });
+                }
+
+                U.openModal({
+                    title: '',
+                    html: box,
+                    size: 'large',
+                    buttons: [
+                        { name: TXT.recheck, onSelect: function () { run(); } },
+                        { name: TXT.close, onSelect: close }
+                    ],
+                    onBack: close
+                });
+
+                run();
+            }
+
+            // ---------------------------------------------------------------- строка в настройках
+
+            var rowItem = null;
+
+            function refreshRow() {
+                if (rowItem) rowItem.find('.settings-param__descr').text(lastSummary());
+            }
+
+            function addSettings(api) {
+                api.addParam({
+                    component: 'lampa_watch',
+                    param: { name: 'lw_health_open', type: 'button' },
+                    field: { name: TXT.setting, description: TXT.settingHint },
+                    onRender: function (item) { rowItem = item; refreshRow(); },
+                    onChange: function () { openDiag({ back: 'settings_component', onDone: refreshRow }); }
+                });
+            }
+
+            return {
+                TXT: TXT,
+                note: note,
+                errors: errors,
+                clearErrors: clearErrors,
+                errorsCard: errorsCard,
+                classify: classify,
+                sourceCard: sourceCard,
+                cmpVer: cmpVer,
+                versionResult: versionResult,
+                fetchLatest: fetchLatest,
+                parserCheck: parserCheck,
+                serverCheck: serverCheck,
+                summarizeFrames: summarizeFrames,
+                frameCheck: frameCheck,
+                whenText: whenText,
+                summaryText: summaryText,
+                lastSummary: lastSummary,
+                worst: worst,
+                openDiag: openDiag,
+                addSettings: addSettings
+            };
+        })();
+    });
 
     run('speed', function (LW) {
         'use strict';
@@ -235,6 +824,139 @@
                 return function cancel() { finish('cancel'); };
             }
 
+
+            // Запас перед стартом. Если раздача качается медленнее, чем нужно фильму, плеер упрётся в конец накопленного.
+            // Чтобы досмотреть без пауз, начало надо накопить заранее: весь недобор за фильм (нужно - есть) * длительность,
+            // плюс 10% на колебания скорости. Один Мбит/с это 125 000 байт в секунду.
+            // Возвращает { needed, bytes, waitSec, waitMin, feasible }: feasible = ждать не дольше часа.
+            var RESERVE_MARGIN = 1.1;
+            var RESERVE_MAX_MIN = 60;
+
+            function reserve(haveMbps, needMbps, durationMin) {
+                var out = { needed: false, bytes: 0, waitSec: 0, waitMin: 0, feasible: false };
+
+                if (!(haveMbps > 0) || !(needMbps > 0) || !(durationMin > 0) || haveMbps >= needMbps) return out;
+
+                var bytes = Math.round((needMbps - haveMbps) * durationMin * 60 * 125000 * RESERVE_MARGIN);
+                var sec = Math.ceil(bytes / (haveMbps * 125000));
+
+                out.needed = true;
+                out.bytes = bytes;
+                out.waitSec = sec;
+                out.waitMin = Math.max(1, Math.round(sec / 60));
+                out.feasible = sec <= RESERVE_MAX_MIN * 60;
+
+                return out;
+            }
+
+            // Сколько реально накопит сервер: предзагрузка TorrServer ограничена своей настройкой (preload_size).
+            // Если она известна и меньше нужного, копим до неё и говорим об этом честно.
+            function reserveTarget(bytes, preloadSize) {
+                if (preloadSize > 0 && preloadSize < bytes) return { bytes: preloadSize, capped: true };
+
+                return { bytes: bytes, capped: false };
+            }
+
+            // Копим запас: опрашиваем состояние торрента, пока не накопится нужное, не упрёмся в предел сервера,
+            // не застоимся или не выйдет время. opts: { url (адрес предзагрузки), get(url, ok, fail), targetBytes, maxMs, interval, stallMs, now() }
+            // done({ reason: 'ready' | 'stalled' | 'time' | 'cancel', preloaded, target, capped, mbps, peers, seconds }), progress({ preloaded, target, pct, mbps, etaSec, peers, elapsed, capped })
+            function accumulate(opts, done, progress) {
+                var interval = opts.interval || 1000;
+                var maxMs = opts.maxMs || 30 * 60000;
+                var stallMs = opts.stallMs || 25000;
+                var now = opts.now || function () { return new Date().getTime(); };
+                var statUrl = opts.url.replace('&preload', '&stat');
+                var started = now();
+                var grew = started;
+                var best = 0;
+                var target = opts.targetBytes;
+                var capped = false;
+                var speeds = [];
+                var last = {};
+                var stopped = false;
+                var timer = null;
+
+                function avgSpeed() {
+                    if (!speeds.length) return 0;
+
+                    var sum = 0;
+
+                    speeds.forEach(function (x) { sum += x; });
+
+                    return sum / speeds.length;
+                }
+
+                function finish(reason) {
+                    if (stopped) return;
+
+                    stopped = true;
+                    clearTimeout(timer);
+
+                    done({
+                        reason: reason, preloaded: best, target: target, capped: capped,
+                        mbps: round1(avgSpeed()), peers: last.peers || 0,
+                        seconds: Math.round(Math.max(1, now() - started) / 1000)
+                    });
+                }
+
+                function tick() {
+                    if (stopped) return;
+
+                    opts.get(statUrl, function (res) {
+                        if (stopped) return;
+
+                        res = res || {};
+
+                        var t = now();
+                        var bytes = res.preloaded_bytes || 0;
+                        var mbps = (res.download_speed || 0) * 8 / 1e6;
+                        var cut = reserveTarget(opts.targetBytes, res.preload_size || 0);
+
+                        target = cut.bytes;
+                        capped = cut.capped;
+
+                        if (bytes > best) {
+                            best = bytes;
+                            grew = t;
+                        }
+
+                        speeds.push(mbps);
+
+                        if (speeds.length > 6) speeds.shift();
+
+                        last = { peers: res.active_peers || 0 };
+
+                        var avg = avgSpeed();
+
+                        if (progress) {
+                            progress({
+                                preloaded: best, target: target, capped: capped,
+                                pct: target > 0 ? Math.min(100, Math.floor(best / target * 100)) : 0,
+                                mbps: round1(avg),
+                                etaSec: avg > 0 && best < target ? Math.ceil((target - best) / (avg * 125000)) : 0,
+                                peers: last.peers, elapsed: t - started
+                            });
+                        }
+
+                        if (target > 0 && best >= target * 0.95) return finish('ready');
+                        if (t - grew >= stallMs) return finish('stalled');
+                        if (t - started >= maxMs) return finish('time');
+
+                        timer = setTimeout(tick, interval);
+                    }, function () {
+                        if (stopped) return;
+
+                        if (now() - started >= maxMs) return finish('time');
+
+                        timer = setTimeout(tick, interval);
+                    });
+                }
+
+                tick();
+
+                return function cancel() { finish('cancel'); };
+            }
+
             return {
                 TYPICAL: TYPICAL,
                 DEFAULT_LINE: DEFAULT_LINE,
@@ -246,7 +968,10 @@
                 verdict: verdict,
                 tips: tips,
                 lighter: lighter,
-                measure: measure
+                measure: measure,
+                reserve: reserve,
+                reserveTarget: reserveTarget,
+                accumulate: accumulate
             };
         })();
     });
@@ -734,6 +1459,144 @@
                 pick: pick,
                 formatSize: formatSize,
                 merge: merge
+            };
+        })();
+    });
+
+    run('series', function (LW) {
+        'use strict';
+
+        /*
+         * Сериалы: следующая серия из той же раздачи.
+         *
+         * Плагин запоминает, какую раздачу человек выбрал для сериала и какую серию запустил. Когда серия
+         * досмотрена (Лампа ведёт учёт просмотра, мы только читаем процент), главная кнопка на карточке
+         * предлагает следующую серию из той же раздачи, без нового поиска и без выбора озвучки заново.
+         * Рядом остаётся «Другая раздача».
+         *
+         * Здесь только данные и решения без интерфейса, чтобы это можно было проверить тестами.
+         */
+        LW.series = (function () {
+            var STORE = 'lw_series';
+            var MAX = 40;          // сколько сериалов помним, старые вытесняются
+            var DONE_PERCENT = 90; // с какого процента просмотра серия считается досмотренной, как в самой Лампе
+
+            function L() {
+                return window.Lampa;
+            }
+
+            function readAll() {
+                var all = null;
+
+                try { all = L().Storage.get(STORE, ''); } catch (e) {}
+
+                if (typeof all === 'string') {
+                    try { all = JSON.parse(all); } catch (e2) { all = null; }
+                }
+
+                return all && typeof all === 'object' && !all.length ? all : {};
+            }
+
+            function writeAll(all) {
+                var ids = Object.keys(all);
+
+                if (ids.length > MAX) {
+                    ids.sort(function (a, b) { return (all[a].at || 0) - (all[b].at || 0); });
+                    ids.slice(0, ids.length - MAX).forEach(function (id) { delete all[id]; });
+                }
+
+                try { L().Storage.set(STORE, JSON.stringify(all)); } catch (e) {}
+            }
+
+            // Из записи парсера оставляем только простые поля: так её можно положить в хранилище и потом отдать Лампе как есть
+            function slim(item) {
+                var out = {};
+
+                Object.keys(item || {}).forEach(function (k) {
+                    var v = item[k];
+                    var t = typeof v;
+
+                    if (t === 'string' || t === 'number' || t === 'boolean') out[k] = v;
+                });
+
+                return out;
+            }
+
+            function key(movie) {
+                return movie && movie.id ? String(movie.id) : '';
+            }
+
+            // Запомнить: сериал, сезон, серия и сама раздача
+            function remember(movie, wishes, item) {
+                var id = key(movie);
+
+                if (!id || !item || !wishes || !(wishes.episode > 0)) return null;
+
+                var all = readAll();
+                var rec = { id: id, season: wishes.season || 0, episode: wishes.episode, at: new Date().getTime(), item: slim(item) };
+
+                all[id] = rec;
+                writeAll(all);
+
+                return rec;
+            }
+
+            function get(movie) {
+                var id = key(movie);
+                var rec = id ? readAll()[id] : null;
+
+                return rec && rec.item && rec.episode > 0 ? rec : null;
+            }
+
+            function forget(movie) {
+                var id = key(movie);
+                var all = readAll();
+
+                if (id && all[id]) {
+                    delete all[id];
+                    writeAll(all);
+                }
+            }
+
+            // Процент просмотра серии по учёту Лампы (0, если серию не смотрели или учёта нет)
+            function watchedPercent(movie, season, episode) {
+                try {
+                    var T = L().Timeline;
+
+                    if (T && T.watchedEpisode) return parseInt(T.watchedEpisode(movie, season || 1, episode), 10) || 0;
+                } catch (e) {}
+
+                return 0;
+            }
+
+            // Что предложить дальше. episodes: сколько серий в сезоне, если известно (0 — неизвестно).
+            // { season, episode, resume } или null, если дальше предлагать нечего (сезон закончился).
+            function step(rec, percent, episodes) {
+                if (!rec || !(rec.episode > 0)) return null;
+
+                if (percent < DONE_PERCENT) return { season: rec.season, episode: rec.episode, resume: true };
+
+                var n = rec.episode + 1;
+
+                if (episodes > 0 && n > episodes) return null;
+
+                return { season: rec.season, episode: n, resume: false };
+            }
+
+            // Надпись на кнопке
+            function label(s) {
+                return 'Серия ' + s.episode + (s.resume ? ' · продолжить' : '') + ' · та же раздача';
+            }
+
+            return {
+                DONE_PERCENT: DONE_PERCENT,
+                slim: slim,
+                remember: remember,
+                get: get,
+                forget: forget,
+                watchedPercent: watchedPercent,
+                step: step,
+                label: label
             };
         })();
     });
@@ -2416,7 +3279,7 @@
          * Защита OLED: через N секунд без нажатий плитки приглушаются, через 10 с прячется верхняя строка.
          */
         LW.theme = (function () {
-            var CSS = "body.lw-theme{--edge:#8db8ff;--mid:#1d4fe0;--deep:#0a2478;--word:#6aa2ff;--glow:rgba(70,130,255,.55);--soft:rgba(40,95,235,.20);--faint:rgba(40,95,235,.08);--ink:#f2f4f8;--dim:rgba(242,244,248,.62);--line:rgba(255,255,255,.1);--ok:#5fe39a;--warn:#ffd25a;--lag:#ff9d4d;--bad:#ff6b6b;background:#000!important;color:var(--ink)}body.lw-theme.lw-lime{--edge:#d9ff4d;--mid:#8bb300;--deep:#3b4d00;--word:#bde600;--glow:rgba(190,235,0,.5);--soft:rgba(165,210,0,.17);--faint:rgba(165,210,0,.07)}body.lw-theme .background{display:none}body.lw-theme #app{background:radial-gradient(48% 46% at 92% 0%,var(--soft),transparent 72%),radial-gradient(40% 40% at 4% 100%,var(--faint),transparent 72%),#000}body.lw-theme .menu__item.focus,body.lw-theme .menu__item.traverse,body.lw-theme .menu__item.hover, body.lw-theme .head__action.focus,body.lw-theme .head__action.hover, body.lw-theme .items-line__more.focus, body.lw-theme .full-start__button.focus, body.lw-theme .simple-button.focus, body.lw-theme .selectbox-item.focus, body.lw-theme .settings-folder.focus, body.lw-theme .settings-param.focus, body.lw-theme .torrent-item.focus, body.lw-theme .modal__button.focus, body.lw-theme .player-panel .button.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.04) 70%);color:var(--ink);box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .head{background:none}body.lw-theme .head__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .head__action,body.lw-theme .head__menu-icon,body.lw-theme .head__backward{border-radius:50%}body.lw-theme .head__action.focus svg,body.lw-theme .head__action.hover svg{color:var(--ink)}body.lw-theme .head__time-now{font-weight:300;letter-spacing:-.02em}body.lw-theme .wrap__left{background:linear-gradient(90deg,#000 72%,rgba(0,0,0,0))}body.lw-theme .menu__item{border-radius:1em;font-weight:300}body.lw-theme .menu__item.focus .menu__ico [stroke],body.lw-theme .menu__item.traverse .menu__ico [stroke],body.lw-theme .menu__item.hover .menu__ico [stroke]{stroke:var(--ink)}body.lw-theme .menu__item.focus .menu__ico path[fill],body.lw-theme .menu__item.focus .menu__ico rect[fill],body.lw-theme .menu__item.focus .menu__ico circle[fill],body.lw-theme .menu__item.traverse .menu__ico path[fill],body.lw-theme .menu__item.hover .menu__ico path[fill]{fill:var(--ink)}body.lw-theme .menu__item.focus .menu__ico>img,body.lw-theme .menu__item.traverse .menu__ico>img,body.lw-theme .menu__item.hover .menu__ico>img{filter:none}body.lw-theme .menu__split{background:var(--line)}body.lw-theme .scroll__body{counter-reset:lwrow}body.lw-theme .items-line__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .items-line__title::before{counter-increment:lwrow;content:counter(lwrow,decimal-leading-zero);margin-right:.8em;color:var(--word)}body.lw-theme .items-line__more{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}body.lw-theme .card__view{border-radius:1.1em}body.lw-theme .card__img{border-radius:1.1em}body.lw-theme .card__vote{background:rgba(0,0,0,.62);border-radius:2em;font-size:1.05em;font-weight:400}body.lw-theme .card__title{font-weight:300;color:var(--ink)}body.lw-theme .card__age{color:var(--dim)}body.lw-theme .card.focus .card__view::after,body.lw-theme .card.hover .card__view::after{border:1px solid var(--edge);border-radius:1.4em;top:-.35em;left:-.35em;right:-.35em;bottom:-.35em;box-shadow:0 0 1.4em var(--glow)}body.lw-theme .full-start__background{opacity:.38}body.lw-theme .full-start-new__title{font-weight:300;letter-spacing:-.035em}body.lw-theme .full-start-new__tagline,body.lw-theme .full-start-new__details{color:var(--dim)}body.lw-theme .full-start__button{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:2em}body.lw-theme .full-start__button.button--play{background:linear-gradient(120deg,var(--deep),var(--mid));border-color:rgba(255,255,255,.18)}body.lw-theme .full-start__button.focus{border-color:transparent}body.lw-theme .full-start__button.button--play.focus{background:linear-gradient(120deg,var(--deep),var(--mid));box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .full-start__rate,body.lw-theme .full-start__status{border-radius:2em}body.lw-theme .full-descr__text{color:var(--dim);font-weight:300}body.lw-theme .full-descr__text.focus{background:none;box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .settings__layer{background:rgba(0,0,0,.6);-webkit-backdrop-filter:none;backdrop-filter:none}body.lw-theme .settings__content,body.lw-theme.glass--style .settings__content{background:linear-gradient(180deg,var(--faint),#000 40%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border-left:1px solid var(--line)}body.lw-theme .settings__title{font-weight:300;letter-spacing:-.02em}body.lw-theme .settings-folder,body.lw-theme .settings-param{border-radius:1em}body.lw-theme .settings-param__value{color:var(--word)}body.lw-theme .settings-param__descr{color:var(--dim)}body.lw-theme .selectbox__layer,body.lw-theme .modal{-webkit-backdrop-filter:none;backdrop-filter:none}body.lw-theme .selectbox__layer{background:rgba(0,0,0,.6)}body.lw-theme .modal{background:rgba(0,0,0,.72)}body.lw-theme .selectbox__content,body.lw-theme .modal__content,body.lw-theme.glass--style .selectbox__content,body.lw-theme.glass--style .modal__content{background:linear-gradient(155deg,var(--soft),#000 55%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border:1px solid rgba(255,255,255,.09);border-radius:1.4em}body.lw-theme .selectbox__title,body.lw-theme .modal__title{font-weight:300;letter-spacing:-.02em}body.lw-theme .selectbox-item{border-radius:1em}body.lw-theme .selectbox-item__subtitle{color:var(--dim)}body.lw-theme .torrent-item{border-radius:1.4em;background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.025) 60%);border:1px solid rgba(255,255,255,.09)}body.lw-theme .torrent-item.focus{border-color:var(--edge)}body.lw-theme .torrent-item__title{font-weight:300}body.lw-theme .torrent-item__seeds span{color:#5fe39a}body.lw-theme .simple-button{border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12)}body.lw-theme .full-start-new__buttons .lw-watch-btn span{display:inline}body.lw-theme .lw-watch-btn{background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.03));border-color:var(--edge);color:var(--ink)}body.lw-theme .lw-watch-btn svg{color:var(--word)}body.lw-theme .lw-watch-btn.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06));box-shadow:inset 0 0 0 .09em var(--edge)}body.lw-theme .modal__footer{flex-wrap:wrap;gap:.7em;padding-top:1.4em}body.lw-theme .modal__button{margin:0;padding:.85em 1.5em;border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);font-weight:300;color:var(--ink)}body.lw-theme .modal__button+.modal__button{margin-left:0}body.lw-theme .modal__button:first-child{background:linear-gradient(120deg,var(--deep),var(--mid));border-color:rgba(255,255,255,.18)}body.lw-theme .modal__button.focus{border-color:transparent;box-shadow:inset 0 0 0 .09em var(--edge)}body.lw-theme .lw-box{padding:.2em .1em 0}body.lw-theme .lw-kicker{margin-bottom:.6em;font-size:.8em;letter-spacing:.24em;color:var(--word);opacity:1}body.lw-theme .lw-title{font-size:1.9em;font-weight:300;letter-spacing:-.03em;line-height:1.15;margin-bottom:.4em}body.lw-theme .lw-line{color:var(--dim);opacity:1}body.lw-theme .lw-h{margin:1.2em 0 .5em;font-size:.8em;letter-spacing:.22em;color:var(--word);opacity:1}body.lw-theme .lw-note{border:1px solid var(--line);border-radius:1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.02));color:var(--dim)}body.lw-theme .lw-stats,body.lw-theme .lw-legend,body.lw-theme .lw-chips,body.lw-theme .lw-empty{color:var(--dim);opacity:1}body.lw-theme .lw-bar,body.lw-theme .lw-qrow__bar{height:.35em;border-radius:1em;background:rgba(255,255,255,.1)}body.lw-theme .lw-bar i,body.lw-theme .lw-qrow__bar i{border-radius:1em;background:linear-gradient(90deg,var(--mid),var(--edge))}body.lw-theme .lw-box--wishes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:.6em;counter-reset:lwq}body.lw-theme .lw-row{display:block;margin:0;padding:.75em 1.1em .8em;border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%);border:1px solid var(--line);color:var(--ink)}body.lw-theme .lw-row__name{font-size:.78em;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}body.lw-theme .lw-row__name::before{counter-increment:lwq;content:counter(lwq,decimal-leading-zero);margin-right:.8em;color:var(--word)}body.lw-theme .lw-row__val{margin:.2em 0 0;text-align:left;font-size:1.35em;font-weight:300;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}body.lw-theme .lw-row.focus,body.lw-theme .lw-tool.focus,body.lw-theme .lw-item.focus,body.lw-theme .lw-more.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.05) 70%);border-color:var(--edge);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .lw-row.focus .lw-row__name{color:var(--word)}body.lw-theme .lw-badge{padding:.12em .75em;border:1px solid var(--line);border-radius:2em;background:none;color:var(--dim)}body.lw-theme .lw-badge--hot,body.lw-theme .lw-item.focus .lw-badge--hot{border-color:var(--edge);background:none;color:var(--edge)}body.lw-theme .lw-item.focus .lw-badge{background:none;color:var(--ink)}body.lw-theme .lw-verdict{padding:.8em 1.1em;border:1px solid;border-radius:1.1em;color:var(--dim)}body.lw-theme .lw-verdict b{font-size:1.15em;font-weight:400;color:var(--ink)}body.lw-theme .lw-verdict--smooth{background:rgba(95,227,154,.08);border-color:rgba(95,227,154,.45)}body.lw-theme .lw-verdict--smooth b{color:var(--ok)}body.lw-theme .lw-verdict--edge{background:rgba(255,210,90,.08);border-color:rgba(255,210,90,.45)}body.lw-theme .lw-verdict--edge b{color:var(--warn)}body.lw-theme .lw-verdict--lag{background:rgba(255,157,77,.09);border-color:rgba(255,157,77,.5)}body.lw-theme .lw-verdict--lag b{color:var(--lag)}body.lw-theme .lw-verdict--bad{background:rgba(255,107,107,.09);border-color:rgba(255,107,107,.5)}body.lw-theme .lw-verdict--bad b{color:var(--bad)}body.lw-theme .lw-checks{display:flex;flex-wrap:wrap;margin:.2em -.2em .4em}body.lw-theme .lw-check{margin:.2em;padding:.2em .85em;border:1px solid var(--line);border-radius:2em;font-size:.95em}body.lw-theme .lw-check--ok::before{color:var(--ok)}body.lw-theme .lw-check--miss::before{color:var(--bad)}body.lw-theme .lw-check--better::before{color:var(--warn)}body.lw-theme .lw-card{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025))}body.lw-theme .lw-card b{font-weight:300;letter-spacing:-.03em}body.lw-theme .lw-card span,body.lw-theme .lw-qrow__name,body.lw-theme .lw-qrow__n{color:var(--dim);opacity:1}body.lw-theme .lw-tool,body.lw-theme .lw-more{border:1px solid rgba(255,255,255,.12);border-radius:2em;background:rgba(255,255,255,.07)}body.lw-theme .lw-tool b{font-weight:400;color:var(--word)}body.lw-theme .lw-item{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%)}body.lw-theme .lw-item__title{font-weight:300}body.lw-theme .lw-item__side b{font-weight:400}body.lw-theme .lw-item__meta{color:var(--dim);opacity:1}body.lw-theme .lw-dot{display:flex;align-items:center;justify-content:center;width:1.7em;height:1.7em;font-size:.9em;font-weight:700;color:#000}body.lw-theme .lw-dot--smooth{background:var(--ok)}body.lw-theme .lw-dot--smooth::before{content:\"\\2713\"}body.lw-theme .lw-dot--edge{background:var(--warn)}body.lw-theme .lw-dot--edge::before{content:\"\\2248\"}body.lw-theme .lw-dot--lag{background:var(--lag)}body.lw-theme .lw-dot--lag::before{content:\"!\"}body.lw-theme .lw-dot--bad{background:var(--bad)}body.lw-theme .lw-dot--bad::before{content:\"\\2715\"}body.lw-theme .lw-prow,body.lw-theme .lw-tc{border:1px solid var(--line);border-radius:1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%)}body.lw-theme .lw-prow--best{border-color:var(--edge);box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .lw-prow__tag{border:1px solid var(--edge);background:none;color:var(--edge)}body.lw-theme .lw-prow--run .lw-prow__dot{background:var(--warn)}body.lw-theme .lw-prow--ok .lw-prow__dot{background:var(--ok)}body.lw-theme .lw-prow--bad .lw-prow__dot{background:var(--bad)}body.lw-theme .lw-prow__info,body.lw-theme .lw-tc__why,body.lw-theme .lw-chg__k{color:var(--dim);opacity:1}body.lw-theme .lw-tc__name{font-weight:400}body.lw-theme .lw-chg{border-bottom-color:var(--line)}body.lw-theme .player-video__overlay{background:linear-gradient(180deg,rgba(0,0,0,.78),rgba(0,0,0,0) 28%,rgba(0,0,0,0) 50%,rgba(0,0,0,.94))}body.lw-theme .player-video__paused,body.lw-theme .player-video__loader{background-color:rgba(0,0,0,.45);border:1px solid var(--line)}body.lw-theme .player-info__title{font-size:2.6em;font-weight:300;letter-spacing:-.035em}body.lw-theme .player-info__name,body.lw-theme .player-info__values{color:var(--dim)}body.lw-theme .player-info__time span,body.lw-theme .player-panel__timenow,body.lw-theme .player-panel__timeend{font-weight:300;font-variant-numeric:tabular-nums}body.lw-theme .player-info__time-end{color:var(--dim)}body.lw-theme .player-info__values .value--name span{font-weight:300;color:var(--ink)}body.lw-theme .player-info__values .value--size span{border:1px solid var(--line);background:none;color:var(--ink)}body.lw-theme .player-info__values .value--pieces span.active{background-color:var(--edge)}body.lw-theme .player-info__values .value--pieces span.red{background-color:var(--bad)}body.lw-theme .player-info__values .value--pieces span.yellow{background-color:var(--warn)}body.lw-theme .player-info__values .value--pieces span.green{background-color:var(--ok)}body.lw-theme .player-panel__timeline{height:.3em;background-color:rgba(255,255,255,.14)}body.lw-theme .player-panel__peding{background-color:rgba(255,255,255,.3)}body.lw-theme .player-panel__position{background:linear-gradient(90deg,var(--mid),var(--edge))}body.lw-theme .player-panel__position>div:after{display:block;background-color:var(--edge);transform:translateY(-50%) translateX(50%) scale(.8)}body.lw-theme .player-panel__timeline.focus{box-shadow:0 0 0 .1em var(--edge)}body.lw-theme .player-panel__time{background:rgba(0,0,0,.75);border:1px solid var(--line);color:var(--ink)}body.lw-theme .player-panel__box-buttons{background:rgba(255,255,255,.07);box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .player-panel .button.focus,body.lw-theme .player-skip.focus{box-shadow:inset 0 0 0 .09em var(--edge)}body.lw-theme .player-panel__playpause{background:linear-gradient(120deg,var(--deep),var(--mid));border:1px solid rgba(255,255,255,.18)}body.lw-theme .player-panel__playpause:not(.focus){background:linear-gradient(120deg,var(--deep),var(--mid))}body.lw-theme .player-panel__playpause.focus{background:linear-gradient(120deg,var(--deep),var(--mid))}body.lw-theme .player-panel__quality{font-weight:300}body.lw-theme .player-skip{background:rgba(0,0,0,.6);border:1px solid var(--line)}body.lw-theme .player-skip.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.05) 70%);color:var(--ink)}body.lw-theme .player-skip__progress-line{background-color:var(--edge)}body.lw-theme .player-footer-card__title{font-weight:300}body.lw-theme .normalization,body.lw-theme .player-video__paused,body.lw-theme .player-video__loader,body.lw-theme .player-video__noise-text,body.lw-theme .player-panel__time,body.lw-theme .player-skip,body.lw-theme .player-chat__body,body.lw-theme .player-panel__box-buttons,body.lw-theme .player-panel__playpause,body.lw-theme .player-info__values .value--size span,body.lw-theme .noty--style--glass,body.lw-theme .settings-input__content,body.lw-theme .settings-input--free,body.lw-theme .navigation-bar__body,body.lw-theme .discuss-rules,body.lw-theme .bell__item,body.lw-theme .media-loading__status,body.lw-theme .card .card__icons-inner,body.lw-theme .card .card__marker,body.lw-theme .card .card-watched,body.lw-theme .head__action{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}body.lw-theme .search .head-backward__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .search__input{font-weight:300;letter-spacing:-.03em;color:var(--ink)}body.lw-theme .search__input.filled::after,body.lw-theme .search-box .search__input.filled::after{border-right-color:var(--edge)}body.lw-theme .simple-keyboard{color:var(--ink)}body.lw-theme .simple-keyboard .hg-button{border-radius:.7em;background:rgba(255,255,255,.055);box-shadow:inset 0 0 0 1px var(--line);color:var(--ink);font-weight:300}body.lw-theme .simple-keyboard .hg-button.hg-activeButton,body.lw-theme .simple-keyboard .hg-button.focus,body.lw-theme .simple-keyboard .hg-button:hover{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .simple-keyboard-input{color:var(--ink)}body.lw-theme .search-history-key,body.lw-theme .search-source{border-radius:2em;background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .search-history-key:before{opacity:.55}body.lw-theme .search-source{color:var(--dim)}body.lw-theme .search-source.active{background:linear-gradient(120deg,var(--deep),var(--mid));box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);color:var(--ink)}body.lw-theme .search-history-key.focus,body.lw-theme .search-source.focus,body.lw-theme .search-source.active.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .search-source__count{background-color:rgba(0,0,0,.55);color:var(--ink)}body.lw-theme .search-looking__text,body.lw-theme .search-history-empty{color:var(--dim)}body.lw-theme .simple-keyboard-mic{box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .simple-keyboard-mic.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .simple-keyboard-mic.record{background:rgba(255,107,107,.16);box-shadow:inset 0 0 0 .09em var(--bad);color:var(--bad)}body.lw-theme .simple-keyboard-buttons__enter,body.lw-theme .simple-keyboard-buttons__cancel{border-radius:2em;box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .simple-keyboard-buttons__enter{background:linear-gradient(120deg,var(--deep),var(--mid))}body.lw-theme .simple-keyboard-buttons__enter:hover,body.lw-theme .simple-keyboard-buttons__cancel:hover{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .settings-input--free{background:radial-gradient(48% 46% at 92% 0%,var(--soft),transparent 72%),#000}body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content{background:#000!important;border-left:1px solid var(--line)}body.lw-theme .settings-input--free .settings-input__content,body.lw-theme.glass--style .settings-input--free .settings-input__content{background:none!important;border-left:0}body.lw-theme .settings-input__title{font-weight:300;letter-spacing:-.02em;color:var(--dim)}body.lw-theme .settings-input__input{font-weight:300;letter-spacing:-.03em;border-bottom-color:var(--line)}body.lw-theme .settings-input__input.filled::after{border-right-color:var(--edge)}body.lw-theme .settings-input__links{background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .settings-input__links.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}body.lw-theme.lw-idle .card:not(.focus),body.lw-theme.lw-idle .menu__item:not(.focus),body.lw-theme.lw-idle .items-line__title{opacity:.55}body.lw-theme.lw-idle10 .head{opacity:0}";
+            var CSS = "body.lw-theme{--edge:#8db8ff;--mid:#1d4fe0;--deep:#0a2478;--word:#6aa2ff;--glow:rgba(70,130,255,.55);--soft:rgba(40,95,235,.20);--faint:rgba(40,95,235,.08);--ink:#f2f4f8;--dim:rgba(242,244,248,.62);--line:rgba(255,255,255,.1);--ok:#5fe39a;--warn:#ffd25a;--lag:#ff9d4d;--bad:#ff6b6b;background:#000!important;color:var(--ink)}body.lw-theme.lw-lime{--edge:#d9ff4d;--mid:#8bb300;--deep:#3b4d00;--word:#bde600;--glow:rgba(190,235,0,.5);--soft:rgba(165,210,0,.17);--faint:rgba(165,210,0,.07)}body.lw-theme .background{display:none}body.lw-theme #app{background:radial-gradient(48% 46% at 92% 0%,var(--soft),transparent 72%),radial-gradient(40% 40% at 4% 100%,var(--faint),transparent 72%),#000}body.lw-theme .menu__item.focus,body.lw-theme .menu__item.traverse,body.lw-theme .menu__item.hover, body.lw-theme .head__action.focus,body.lw-theme .head__action.hover, body.lw-theme .items-line__more.focus, body.lw-theme .full-start__button.focus, body.lw-theme .simple-button.focus, body.lw-theme .selectbox-item.focus, body.lw-theme .settings-folder.focus, body.lw-theme .settings-param.focus, body.lw-theme .torrent-item.focus, body.lw-theme .modal__button.focus, body.lw-theme .player-panel .button.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.04) 70%);color:var(--ink);box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .head{background:none}body.lw-theme .head__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .head__action,body.lw-theme .head__menu-icon,body.lw-theme .head__backward{border-radius:50%}body.lw-theme .head__action.focus svg,body.lw-theme .head__action.hover svg{color:var(--ink)}body.lw-theme .head__time-now{font-weight:300;letter-spacing:-.02em}body.lw-theme .wrap__left{background:linear-gradient(90deg,#000 72%,rgba(0,0,0,0))}body.lw-theme .menu__item{border-radius:1em;font-weight:300}body.lw-theme .menu__item.focus .menu__ico [stroke],body.lw-theme .menu__item.traverse .menu__ico [stroke],body.lw-theme .menu__item.hover .menu__ico [stroke]{stroke:var(--ink)}body.lw-theme .menu__item.focus .menu__ico path[fill],body.lw-theme .menu__item.focus .menu__ico rect[fill],body.lw-theme .menu__item.focus .menu__ico circle[fill],body.lw-theme .menu__item.traverse .menu__ico path[fill],body.lw-theme .menu__item.hover .menu__ico path[fill]{fill:var(--ink)}body.lw-theme .menu__item.focus .menu__ico>img,body.lw-theme .menu__item.traverse .menu__ico>img,body.lw-theme .menu__item.hover .menu__ico>img{filter:none}body.lw-theme .menu__split{background:var(--line)}body.lw-theme .scroll__body{counter-reset:lwrow}body.lw-theme .items-line__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .items-line__title::before{counter-increment:lwrow;content:counter(lwrow,decimal-leading-zero);margin-right:.8em;color:var(--word)}body.lw-theme .items-line__more{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}body.lw-theme .card__view{border-radius:1.1em}body.lw-theme .card__img{border-radius:1.1em}body.lw-theme .card__vote{background:rgba(0,0,0,.62);border-radius:2em;font-size:1.05em;font-weight:400}body.lw-theme .card__title{font-weight:300;color:var(--ink)}body.lw-theme .card__age{color:var(--dim)}body.lw-theme .card.focus .card__view::after,body.lw-theme .card.hover .card__view::after{border:1px solid var(--edge);border-radius:1.4em;top:-.35em;left:-.35em;right:-.35em;bottom:-.35em;box-shadow:0 0 1.4em var(--glow)}body.lw-theme .full-start__background{opacity:.38}body.lw-theme .full-start-new__title{font-weight:300;letter-spacing:-.035em}body.lw-theme .full-start-new__tagline,body.lw-theme .full-start-new__details{color:var(--dim)}body.lw-theme .full-start__button{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:2em}body.lw-theme .full-start__button.button--play{background:linear-gradient(120deg,var(--deep),var(--mid));border-color:rgba(255,255,255,.18)}body.lw-theme .full-start__button.focus{border-color:transparent}body.lw-theme .full-start__button.button--play.focus{background:linear-gradient(120deg,var(--deep),var(--mid));box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .full-start__rate,body.lw-theme .full-start__status{border-radius:2em}body.lw-theme .full-descr__text{color:var(--dim);font-weight:300}body.lw-theme .full-descr__text.focus{background:none;box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .settings__layer{background:rgba(0,0,0,.6);-webkit-backdrop-filter:none;backdrop-filter:none}body.lw-theme .settings__content,body.lw-theme.glass--style .settings__content{background:linear-gradient(180deg,var(--faint),#000 40%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border-left:1px solid var(--line)}body.lw-theme .settings__title{font-weight:300;letter-spacing:-.02em}body.lw-theme .settings-folder,body.lw-theme .settings-param{border-radius:1em}body.lw-theme .settings-param__value{color:var(--word)}body.lw-theme .settings-param__descr{color:var(--dim)}body.lw-theme .selectbox__layer,body.lw-theme .modal{-webkit-backdrop-filter:none;backdrop-filter:none}body.lw-theme .selectbox__layer{background:rgba(0,0,0,.6)}body.lw-theme .modal{background:rgba(0,0,0,.72)}body.lw-theme .selectbox__content,body.lw-theme .modal__content,body.lw-theme.glass--style .selectbox__content,body.lw-theme.glass--style .modal__content{background:linear-gradient(155deg,var(--soft),#000 55%),#000!important;-webkit-backdrop-filter:none;backdrop-filter:none;border:1px solid rgba(255,255,255,.09);border-radius:1.4em}body.lw-theme .selectbox__title,body.lw-theme .modal__title{font-weight:300;letter-spacing:-.02em}body.lw-theme .selectbox-item{border-radius:1em}body.lw-theme .selectbox-item__subtitle{color:var(--dim)}body.lw-theme .torrent-item{border-radius:1.4em;background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.025) 60%);border:1px solid rgba(255,255,255,.09)}body.lw-theme .torrent-item.focus{border-color:var(--edge)}body.lw-theme .torrent-item__title{font-weight:300}body.lw-theme .torrent-item__seeds span{color:#5fe39a}body.lw-theme .simple-button{border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12)}body.lw-theme .full-start-new__buttons .lw-watch-btn span,body.lw-theme .full-start-new__buttons .lw-next-btn span{display:inline}body.lw-theme .lw-watch-btn,body.lw-theme .lw-next-btn{background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.03));border-color:var(--edge);color:var(--ink)}body.lw-theme .lw-watch-btn svg,body.lw-theme .lw-next-btn svg{color:var(--word)}body.lw-theme .lw-watch-btn.focus,body.lw-theme .lw-next-btn.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06));box-shadow:inset 0 0 0 .09em var(--edge)}body.lw-theme .lw-next-btn{background:linear-gradient(155deg,var(--mid),var(--deep))}body.lw-theme .lw-next-btn.focus{background:linear-gradient(155deg,var(--mid),var(--deep));box-shadow:inset 0 0 0 .09em var(--edge),0 0 0 .12em var(--glow)}body.lw-theme .modal__footer{flex-wrap:wrap;gap:.7em;padding-top:1.4em}body.lw-theme .modal__button{margin:0;padding:.85em 1.5em;border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);font-weight:300;color:var(--ink)}body.lw-theme .modal__button+.modal__button{margin-left:0}body.lw-theme .modal__button:first-child{background:linear-gradient(120deg,var(--deep),var(--mid));border-color:rgba(255,255,255,.18)}body.lw-theme .modal__button.focus{border-color:transparent;box-shadow:inset 0 0 0 .09em var(--edge)}body.lw-theme .lw-box{padding:.2em .1em 0}body.lw-theme .lw-kicker{margin-bottom:.6em;font-size:.8em;letter-spacing:.24em;color:var(--word);opacity:1}body.lw-theme .lw-title{font-size:1.9em;font-weight:300;letter-spacing:-.03em;line-height:1.15;margin-bottom:.4em}body.lw-theme .lw-line{color:var(--dim);opacity:1}body.lw-theme .lw-h{margin:1.2em 0 .5em;font-size:.8em;letter-spacing:.22em;color:var(--word);opacity:1}body.lw-theme .lw-note{border:1px solid var(--line);border-radius:1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.02));color:var(--dim)}body.lw-theme .lw-stats,body.lw-theme .lw-legend,body.lw-theme .lw-chips,body.lw-theme .lw-empty{color:var(--dim);opacity:1}body.lw-theme .lw-bar,body.lw-theme .lw-qrow__bar{height:.35em;border-radius:1em;background:rgba(255,255,255,.1)}body.lw-theme .lw-bar i,body.lw-theme .lw-qrow__bar i{border-radius:1em;background:linear-gradient(90deg,var(--mid),var(--edge))}body.lw-theme .lw-box--wishes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:.6em;counter-reset:lwq}body.lw-theme .lw-row{display:block;margin:0;padding:.75em 1.1em .8em;border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%);border:1px solid var(--line);color:var(--ink)}body.lw-theme .lw-row__name{font-size:.78em;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}body.lw-theme .lw-row__name::before{counter-increment:lwq;content:counter(lwq,decimal-leading-zero);margin-right:.8em;color:var(--word)}body.lw-theme .lw-row__val{margin:.2em 0 0;text-align:left;font-size:1.35em;font-weight:300;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}body.lw-theme .lw-row.focus,body.lw-theme .lw-tool.focus,body.lw-theme .lw-item.focus,body.lw-theme .lw-more.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.05) 70%);border-color:var(--edge);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .lw-row.focus .lw-row__name{color:var(--word)}body.lw-theme .lw-badge{padding:.12em .75em;border:1px solid var(--line);border-radius:2em;background:none;color:var(--dim)}body.lw-theme .lw-badge--hot,body.lw-theme .lw-item.focus .lw-badge--hot{border-color:var(--edge);background:none;color:var(--edge)}body.lw-theme .lw-item.focus .lw-badge{background:none;color:var(--ink)}body.lw-theme .lw-verdict{padding:.8em 1.1em;border:1px solid;border-radius:1.1em;color:var(--dim)}body.lw-theme .lw-verdict b{font-size:1.15em;font-weight:400;color:var(--ink)}body.lw-theme .lw-verdict--smooth{background:rgba(95,227,154,.08);border-color:rgba(95,227,154,.45)}body.lw-theme .lw-verdict--smooth b{color:var(--ok)}body.lw-theme .lw-verdict--edge{background:rgba(255,210,90,.08);border-color:rgba(255,210,90,.45)}body.lw-theme .lw-verdict--edge b{color:var(--warn)}body.lw-theme .lw-verdict--lag{background:rgba(255,157,77,.09);border-color:rgba(255,157,77,.5)}body.lw-theme .lw-verdict--lag b{color:var(--lag)}body.lw-theme .lw-verdict--bad{background:rgba(255,107,107,.09);border-color:rgba(255,107,107,.5)}body.lw-theme .lw-verdict--bad b{color:var(--bad)}body.lw-theme .lw-checks{display:flex;flex-wrap:wrap;margin:.2em -.2em .4em}body.lw-theme .lw-check{margin:.2em;padding:.2em .85em;border:1px solid var(--line);border-radius:2em;font-size:.95em}body.lw-theme .lw-check--ok::before{color:var(--ok)}body.lw-theme .lw-check--miss::before{color:var(--bad)}body.lw-theme .lw-check--better::before{color:var(--warn)}body.lw-theme .lw-card{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025))}body.lw-theme .lw-card b{font-weight:300;letter-spacing:-.03em}body.lw-theme .lw-card span,body.lw-theme .lw-qrow__name,body.lw-theme .lw-qrow__n{color:var(--dim);opacity:1}body.lw-theme .lw-tool,body.lw-theme .lw-more{border:1px solid rgba(255,255,255,.12);border-radius:2em;background:rgba(255,255,255,.07)}body.lw-theme .lw-tool b{font-weight:400;color:var(--word)}body.lw-theme .lw-item{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%)}body.lw-theme .lw-item__title{font-weight:300}body.lw-theme .lw-item__side b{font-weight:400}body.lw-theme .lw-item__meta{color:var(--dim);opacity:1}body.lw-theme .lw-dot{display:flex;align-items:center;justify-content:center;width:1.7em;height:1.7em;font-size:.9em;font-weight:700;color:#000}body.lw-theme .lw-dot--smooth{background:var(--ok)}body.lw-theme .lw-dot--smooth::before{content:\"\\2713\"}body.lw-theme .lw-dot--edge{background:var(--warn)}body.lw-theme .lw-dot--edge::before{content:\"\\2248\"}body.lw-theme .lw-dot--lag{background:var(--lag)}body.lw-theme .lw-dot--lag::before{content:\"!\"}body.lw-theme .lw-dot--bad{background:var(--bad)}body.lw-theme .lw-dot--bad::before{content:\"\\2715\"}body.lw-theme .lw-prow,body.lw-theme .lw-tc{border:1px solid var(--line);border-radius:1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%)}body.lw-theme .lw-prow--best{border-color:var(--edge);box-shadow:inset 0 0 0 1px var(--edge)}body.lw-theme .lw-prow__tag{border:1px solid var(--edge);background:none;color:var(--edge)}body.lw-theme .lw-prow--run .lw-prow__dot{background:var(--warn)}body.lw-theme .lw-prow--ok .lw-prow__dot{background:var(--ok)}body.lw-theme .lw-prow--bad .lw-prow__dot{background:var(--bad)}body.lw-theme .lw-prow__info,body.lw-theme .lw-tc__why,body.lw-theme .lw-chg__k{color:var(--dim);opacity:1}body.lw-theme .lw-tc__name{font-weight:400}body.lw-theme .lw-chg{border-bottom-color:var(--line)}body.lw-theme .player-video__overlay{background:linear-gradient(180deg,rgba(0,0,0,.78),rgba(0,0,0,0) 28%,rgba(0,0,0,0) 50%,rgba(0,0,0,.94))}body.lw-theme .player-video__paused,body.lw-theme .player-video__loader{background-color:rgba(0,0,0,.45);border:1px solid var(--line)}body.lw-theme .player-info__title{font-size:2.6em;font-weight:300;letter-spacing:-.035em}body.lw-theme .player-info__name,body.lw-theme .player-info__values{color:var(--dim)}body.lw-theme .player-info__time span,body.lw-theme .player-panel__timenow,body.lw-theme .player-panel__timeend{font-weight:300;font-variant-numeric:tabular-nums}body.lw-theme .player-info__time-end{color:var(--dim)}body.lw-theme .player-info__values .value--name span{font-weight:300;color:var(--ink)}body.lw-theme .player-info__values .value--size span{border:1px solid var(--line);background:none;color:var(--ink)}body.lw-theme .player-info__values .value--pieces span.active{background-color:var(--edge)}body.lw-theme .player-info__values .value--pieces span.red{background-color:var(--bad)}body.lw-theme .player-info__values .value--pieces span.yellow{background-color:var(--warn)}body.lw-theme .player-info__values .value--pieces span.green{background-color:var(--ok)}body.lw-theme .player-panel__timeline{height:.3em;background-color:rgba(255,255,255,.14)}body.lw-theme .player-panel__peding{background-color:rgba(255,255,255,.3)}body.lw-theme .player-panel__position{background:linear-gradient(90deg,var(--mid),var(--edge))}body.lw-theme .player-panel__position>div:after{display:block;background-color:var(--edge);transform:translateY(-50%) translateX(50%) scale(.8)}body.lw-theme .player-panel__timeline.focus{box-shadow:0 0 0 .1em var(--edge)}body.lw-theme .player-panel__time{background:rgba(0,0,0,.75);border:1px solid var(--line);color:var(--ink)}body.lw-theme .player-panel__box-buttons{background:rgba(255,255,255,.07);box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .player-panel .button.focus,body.lw-theme .player-skip.focus{box-shadow:inset 0 0 0 .09em var(--edge)}body.lw-theme .player-panel__playpause{background:linear-gradient(120deg,var(--deep),var(--mid));border:1px solid rgba(255,255,255,.18)}body.lw-theme .player-panel__playpause:not(.focus){background:linear-gradient(120deg,var(--deep),var(--mid))}body.lw-theme .player-panel__playpause.focus{background:linear-gradient(120deg,var(--deep),var(--mid))}body.lw-theme .player-panel__quality{font-weight:300}body.lw-theme .player-skip{background:rgba(0,0,0,.6);border:1px solid var(--line)}body.lw-theme .player-skip.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.05) 70%);color:var(--ink)}body.lw-theme .player-skip__progress-line{background-color:var(--edge)}body.lw-theme .player-footer-card__title{font-weight:300}body.lw-theme .normalization,body.lw-theme .player-video__paused,body.lw-theme .player-video__loader,body.lw-theme .player-video__noise-text,body.lw-theme .player-panel__time,body.lw-theme .player-skip,body.lw-theme .player-chat__body,body.lw-theme .player-panel__box-buttons,body.lw-theme .player-panel__playpause,body.lw-theme .player-info__values .value--size span,body.lw-theme .noty--style--glass,body.lw-theme .settings-input__content,body.lw-theme .settings-input--free,body.lw-theme .navigation-bar__body,body.lw-theme .discuss-rules,body.lw-theme .bell__item,body.lw-theme .media-loading__status,body.lw-theme .card .card__icons-inner,body.lw-theme .card .card__marker,body.lw-theme .card .card-watched,body.lw-theme .head__action{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}body.lw-theme .search .head-backward__title{font-size:1.05em;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}body.lw-theme .search__input{font-weight:300;letter-spacing:-.03em;color:var(--ink)}body.lw-theme .search__input.filled::after,body.lw-theme .search-box .search__input.filled::after{border-right-color:var(--edge)}body.lw-theme .simple-keyboard{color:var(--ink)}body.lw-theme .simple-keyboard .hg-button{border-radius:.7em;background:rgba(255,255,255,.055);box-shadow:inset 0 0 0 1px var(--line);color:var(--ink);font-weight:300}body.lw-theme .simple-keyboard .hg-button.hg-activeButton,body.lw-theme .simple-keyboard .hg-button.focus,body.lw-theme .simple-keyboard .hg-button:hover{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .simple-keyboard-input{color:var(--ink)}body.lw-theme .search-history-key,body.lw-theme .search-source{border-radius:2em;background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .search-history-key:before{opacity:.55}body.lw-theme .search-source{color:var(--dim)}body.lw-theme .search-source.active{background:linear-gradient(120deg,var(--deep),var(--mid));box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);color:var(--ink)}body.lw-theme .search-history-key.focus,body.lw-theme .search-source.focus,body.lw-theme .search-source.active.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .search-source__count{background-color:rgba(0,0,0,.55);color:var(--ink)}body.lw-theme .search-looking__text,body.lw-theme .search-history-empty{color:var(--dim)}body.lw-theme .simple-keyboard-mic{box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .simple-keyboard-mic.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .simple-keyboard-mic.record{background:rgba(255,107,107,.16);box-shadow:inset 0 0 0 .09em var(--bad);color:var(--bad)}body.lw-theme .simple-keyboard-buttons__enter,body.lw-theme .simple-keyboard-buttons__cancel{border-radius:2em;box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .simple-keyboard-buttons__enter{background:linear-gradient(120deg,var(--deep),var(--mid))}body.lw-theme .simple-keyboard-buttons__enter:hover,body.lw-theme .simple-keyboard-buttons__cancel:hover{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .settings-input--free{background:radial-gradient(48% 46% at 92% 0%,var(--soft),transparent 72%),#000}body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content{background:#000!important;border-left:1px solid var(--line)}body.lw-theme .settings-input--free .settings-input__content,body.lw-theme.glass--style .settings-input--free .settings-input__content{background:none!important;border-left:0}body.lw-theme .settings-input__title{font-weight:300;letter-spacing:-.02em;color:var(--dim)}body.lw-theme .settings-input__input{font-weight:300;letter-spacing:-.03em;border-bottom-color:var(--line)}body.lw-theme .settings-input__input.filled::after{border-right-color:var(--edge)}body.lw-theme .settings-input__links{background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--line)}body.lw-theme .settings-input__links.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}body.lw-theme .lw-dgc{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025))}body.lw-theme .lw-dgc[data-level=warn]{border-color:rgba(255,210,90,.4)}body.lw-theme .lw-dgc[data-level=bad]{border-color:rgba(255,107,107,.5)}body.lw-theme .lw-dgc__l{color:var(--dim);opacity:1;letter-spacing:.2em}body.lw-theme .lw-dgc__w{color:var(--ink);opacity:.8}body.lw-theme .lw-dgc__v{font-weight:300;letter-spacing:-.02em;color:var(--ink)}body.lw-theme .lw-dgc__s{color:var(--dim);opacity:1}body.lw-theme .lw-reserve{padding:.8em 1.1em;margin-bottom:.8em;border:1px solid rgba(255,157,77,.5);border-radius:1.1em;background:rgba(255,157,77,.09);color:var(--dim)}body.lw-theme .lw-reserve b{display:block;margin-bottom:.2em;font-size:1.15em;font-weight:400;color:var(--lag)}body.lw-theme .lw-big{font-size:7em;font-weight:200;letter-spacing:-.06em;line-height:1;margin:0 0 .15em;color:var(--ink)}body.lw-theme .lw-big small{font-size:.35em;letter-spacing:0;color:var(--word);opacity:1}body.lw-theme .lw-cards--three .lw-card{flex:1 1 0;min-width:0}body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}body.lw-theme.lw-idle .card:not(.focus),body.lw-theme.lw-idle .menu__item:not(.focus),body.lw-theme.lw-idle .items-line__title{opacity:.55}body.lw-theme.lw-idle10 .head{opacity:0}";
 
             var K = { on: 'lw_theme', accent: 'lw_theme_accent', idle: 'lw_theme_idle', fails: 'lw_theme_fails' };
             var STYLE_ID = 'lw-theme-css';
@@ -2681,6 +3544,7 @@
         var STORE_WISHES = 'lw_wishes';
         var STORE_LINE = 'lw_line_peak';
         var STORE_SORT = 'lw_sort';
+        var STORE_PREFETCH = 'lw_prefetch';
         var PAGE = 40; // сколько раздач показываем сразу, остальные по кнопке «Показать ещё»
         var CFG = window.lampa_watch_config || {}; // для тестов: сокращает паузы
         var PENDING_TTL = 110000; // дольше этого торрент не ждём: Лампа сама сдаётся через 90 секунд
@@ -2688,11 +3552,16 @@
         var WARMUP_MS = CFG.warmup === undefined ? 3000 : CFG.warmup;
         var TICK_MS = CFG.interval || 1000;
         var SETTLE_MS = CFG.settle === undefined ? 150 : CFG.settle;
+        var PREFETCH_DELAY = CFG.prefetchDelay === undefined ? 2000 : CFG.prefetchDelay; // даём карточке отрисоваться, потом ищем
+        var PREFETCH_TTL = 10 * 60 * 1000;   // найденное заранее считаем свежим 10 минут
+        var MISSING_MS = CFG.missingMs === undefined ? 3500 : CFG.missingMs; // через сколько говорим, что нужной серии в раздаче нет
 
         var pending = null;       // запуск, начатый нами: ждём список файлов и нажимаем нужный
         var cancelMeasure = null; // остановить идущий замер
         var runId = 0;            // номер поиска: поздний ответ отменённого поиска игнорируется
         var listModal = null;     // параметры открытого окна со списком: по ним его можно перерисовать на месте
+        var found = {};           // что парсер вернул заранее: ключ «фильм|сезон|запрос» → { at, json }
+        var inflight = {};        // поиски, которые идут прямо сейчас: ключ → ожидающие ответа
 
         // ---------------------------------------------------------------- тексты и варианты
 
@@ -2739,7 +3608,21 @@
             anyway: 'Всё равно смотреть',
             watch: 'Смотреть',
             lighter: 'Взять версию полегче',
-            cancel: 'Отмена'
+            lighterShort: 'Версия полегче',
+            cancel: 'Отмена',
+            otherRelease: 'Другая раздача',
+            nextMissing: 'В этой раздаче нет серии ',
+            foundAhead: 'Раздачи найдены заранее',
+            reserveGo: 'Накопить запас и смотреть',
+            now: 'Запустить сразу',
+            reserveNeed: 'Нужен запас перед стартом',
+            reserveKicker: 'Запас перед стартом',
+            reserveTitle: 'Копим запас',
+            reserveNow: 'Начать сейчас',
+            reserveSaved: 'накоплено',
+            reserveSpeed: 'скорость',
+            reserveEta: 'до старта',
+            reserveCapNote: 'Предел задаёт настройка предзагрузки TorrServer: больше он копить не станет.'
         };
 
         var OPTIONS = {
@@ -2787,7 +3670,8 @@
             wait: function (v) { return 'Если запустить и подождать около ' + v.waitMin + ' мин, запас накопится и дальше пойдёт без пауз.'; },
             cache: function () { return 'Увеличьте кэш TorrServer (в его настройках «Размер кэша» 512 МБ и больше): запас буфера сгладит провалы скорости.'; },
             wired: function () { return 'Для такого тяжёлого файла нужна быстрая сеть: проводное подключение или Wi-Fi 5 ГГц и на телевизоре, и на компьютере с TorrServer.'; },
-            otherDownloads: function () { return 'Закройте другие загрузки и VPN на компьютере с TorrServer: они забирают скорость.'; }
+            otherDownloads: function () { return 'Закройте другие загрузки и VPN на компьютере с TorrServer: они забирают скорость.'; },
+            reserveCap: function (v, rs) { return 'TorrServer копит запас только до ' + S.formatSize(rs.cap) + ', а нужно около ' + S.formatSize(rs.r.bytes) + '. Увеличьте кеш и предзагрузку в настройках TorrServer (кнопка «Настроить TorrServer»).'; }
         };
 
         // ---------------------------------------------------------------- вспомогательное
@@ -2798,6 +3682,9 @@
 
         function log(msg) {
             try { if (window.console) console.log('[lampa-watch] ' + msg); } catch (e) {}
+
+            // log зовут только при сбоях: они же попадают в «Диагностику»
+            if (LW.health) LW.health.note('watch', msg);
         }
 
         function noty(text) {
@@ -2943,6 +3830,11 @@
                 '.lw-tips{margin:.6em 0 0;padding-left:1.2em}',
                 '.lw-tips li{margin:.4em 0;line-height:1.35}',
                 '.lw-stats{opacity:.6;font-size:.9em;margin-top:.8em;line-height:1.5}',
+                '.lw-reserve{padding:.7em 1em;border-radius:.6em;margin-bottom:.8em;border-left:.3em solid #f2994a;background:rgba(242,153,74,.16)}',
+                '.lw-reserve b{display:block;margin-bottom:.2em;font-size:1.1em}',
+                '.lw-big{font-size:5em;font-weight:200;line-height:1;margin:.05em 0 .15em}',
+                '.lw-big small{font-size:.4em;margin-left:.1em;opacity:.6}',
+                '.lw-cards--three .lw-card{flex:1 1 0;min-width:0}',
                 '.lw-bar{height:.5em;border-radius:.25em;background:rgba(255,255,255,.12);overflow:hidden;margin:.9em 0}',
                 '.lw-bar i{display:block;height:100%;width:0;background:#2f6fe4;transition:width .4s}',
                 '.lw-live{font-size:1.1em;line-height:1.6}',
@@ -3047,6 +3939,22 @@
             return box;
         }
 
+        // Тяжёлая раздача: прикидка говорит, что скорости не хватит, но запас перед стартом это решает
+        function reserveFor(entry, movie) {
+            var r = SP.reserve(entry.est, entry.need, SP.runtimeMin(movie));
+
+            return r.needed && r.feasible ? r : null;
+        }
+
+        function reserveBlock(r) {
+            var box = h('div', 'lw-reserve');
+
+            box.append(h('b', '', TXT.reserveNeed));
+            box.append(h('div', '', 'Без запаса будет лагать. Если накопить около ' + S.formatSize(r.bytes) + ' (≈ ' + r.waitMin + ' мин), досмотрите до конца без пауз.'));
+
+            return box;
+        }
+
         function checksBlock(entry, picked) {
             var box = h('div', 'lw-checks');
             var shown = 0;
@@ -3114,6 +4022,80 @@
             } else {
                 root.find('.view--torrent').after(btn);
             }
+
+            root.data('lw-movie', movie);
+            paintNext(root, movie);
+            prefetchLater(root, movie);
+        }
+
+        // ---------------------------------------------------------------- сериал: следующая серия
+
+        // Что предложить для сериала: запись о раздаче, процент просмотра и следующий шаг
+        function nextFor(movie) {
+            if (!LW.series || !SP.isTv(movie)) return null;
+
+            var rec = LW.series.get(movie);
+
+            if (!rec) return null;
+
+            var eps = 0;
+
+            seasonList(movie).forEach(function (x) { if (x.n === rec.season) eps = x.episodes; });
+
+            var st = LW.series.step(rec, LW.series.watchedPercent(movie, rec.season, rec.episode), eps);
+
+            return st ? { rec: rec, step: st } : null;
+        }
+
+        // Кнопка «Серия N · та же раздача» перед «Лучшая раздача»; саму её тогда зовём «Другая раздача»
+        function paintNext(root, movie) {
+            var watch = root.find('.lw-watch-btn');
+            var next = root.find('.lw-next-btn');
+            var n = nextFor(movie);
+
+            if (!watch.length) return;
+
+            if (!n) {
+                next.remove();
+                watch.find('span').text(TXT.button);
+                return;
+            }
+
+            if (!next.length) {
+                next = $('<div class="full-start__button selector lw-next-btn"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span></span></div>');
+                next.on('hover:enter', function () { playNext(movie); });
+                watch.before(next);
+            }
+
+            next.find('span').text(LW.series.label(n.step));
+            watch.find('span').text(TXT.otherRelease);
+        }
+
+        function playNext(movie) {
+            var n = nextFor(movie);
+
+            if (!n) return openWishes(movie);
+
+            var w = loadWishes();
+
+            w.season = n.step.season;
+            w.episode = n.step.episode;
+
+            var entry = S.evaluate(n.rec.item, w, movie);
+            var picked = { wishes: w, best: entry, ranked: [entry], playable: [entry], missed: [], stats: { total: 1, usable: 1, quality: {}, tracker: {} } };
+
+            noty('Серия ' + w.episode + ' · ' + briefOf(entry));
+            launch(movie, picked, entry, 'next');
+        }
+
+        // Вернулись с просмотра на карточку: надписи на кнопках могли устареть
+        function refreshNext() {
+            try {
+                var root = $('.activity--active');
+                var movie = root.data('lw-movie');
+
+                if (movie) paintNext(root, movie);
+            } catch (e) {}
         }
 
         // ---------------------------------------------------------------- пожелания
@@ -3233,6 +4215,35 @@
 
             saveWishes(w);
 
+            // Общая часть: у нас есть ответ парсера (свой или найденный заранее), выбираем лучшую раздачу.
+            function onResults(json, ahead) {
+                if (my !== runId) return;
+
+                var picked = S.pick((json && json.Results) || [], w, movie);
+
+                picked.seconds = ahead ? 0 : Math.round((new Date().getTime() - started) / 1000);
+                picked.ahead = !!ahead;
+                picked.query = query || '';
+
+                if (!ahead) closeModal();
+
+                if (mode === 'list' && picked.ranked.length) return openList(movie, picked);
+
+                if (!picked.best) return showNothing(movie, w, '', mode, picked);
+
+                if (w.instant) {
+                    noty('Выбрано: ' + briefOf(picked.best));
+                    return launch(movie, picked, picked.best);
+                }
+
+                showResult(movie, picked, picked.best);
+            }
+
+            // Раздачи уже найдены заранее: экран поиска не нужен. После подбора парсера (repaired) старому ответу не верим.
+            var ahead = repaired ? null : cachedResults(movie, w.season, query);
+
+            if (ahead) return onResults(ahead, true);
+
             var box = h('div', 'lw-box');
 
             box.append(h('div', 'lw-title', TXT.searching));
@@ -3258,6 +4269,8 @@
 
                 closeModal();
 
+                if (LW.health) LW.health.note('parser', text);
+
                 // парсер молчит: подбираем другой сами и повторяем поиск; не вышло или выключено — даём кнопку
                 var again = function () { findAndWatch(movie, w, mode, query, true); };
 
@@ -3265,7 +4278,12 @@
                     LW.setup.repairParser(function (status) {
                         if (my !== runId) return;
 
-                        if (status === 'applied') return again();
+                        if (status === 'applied') {
+                            if (LW.health) LW.health.note('parser', text, 'Плагин сам подобрал другой парсер и повторил поиск');
+
+                            return again();
+                        }
+
                         if (status === 'cancel') return backToContent();
 
                         showNothing(movie, w, text, mode, null, again);
@@ -3277,34 +4295,84 @@
                 showNothing(movie, w, text, mode, null, LW.setup ? again : null);
             }
 
+            getResults(movie, w.season, query, !!repaired, function (json) { onResults(json, false); }, function (err) {
+                fail(TXT.parserError + (err ? ': ' + shortText(err, 120) : ''));
+            });
+        }
+
+        // ---------------------------------------------------------------- поиск заранее
+
+        function prefetchOn() {
+            var v;
+
+            try { v = L().Storage.get(STORE_PREFETCH, true); } catch (e) { return true; }
+
+            return !(v === false || v === 'false');
+        }
+
+        function resultsKey(movie, season, query) {
+            return (movie && movie.id ? movie.id : '') + '|' + (season || 0) + '|' + (query || '');
+        }
+
+        function cachedResults(movie, season, query) {
+            var hit = found[resultsKey(movie, season, query)];
+
+            return hit && new Date().getTime() - hit.at < PREFETCH_TTL ? hit.json : null;
+        }
+
+        // Один запрос на ключ. Если такой поиск уже идёт (например, начатый заранее), присоединяемся к нему, а не гоняем парсер ещё раз.
+        // fresh: игнорировать идущий поиск (после подбора парсера).
+        function getResults(movie, season, query, fresh, ok, fail) {
+            var key = resultsKey(movie, season, query);
+
+            if (!fresh && inflight[key]) {
+                inflight[key].push({ ok: ok, fail: fail });
+                return;
+            }
+
+            runSearch(key, movie, season, query, [{ ok: ok, fail: fail }]);
+        }
+
+        function runSearch(key, movie, season, query, waiters) {
+            inflight[key] = waiters;
+
+            function end(failed, value) {
+                var list = inflight[key] || [];
+                var t = new Date().getTime();
+
+                delete inflight[key];
+
+                // пустой ответ не запоминаем: парсер мог просто моргнуть
+                if (!failed && value && value.Results && value.Results.length) {
+                    Object.keys(found).forEach(function (k) { if (t - found[k].at >= PREFETCH_TTL) delete found[k]; });
+                    found[key] = { at: t, json: value };
+                }
+
+                list.forEach(function (x) { if (failed) x.fail(value); else x.ok(value); });
+            }
+
             try {
-                L().Parser.get(searchObject(movie, w.season, query), function (json) {
-                    if (my !== runId) return;
-
-                    var picked = S.pick((json && json.Results) || [], w, movie);
-
-                    picked.seconds = Math.round((new Date().getTime() - started) / 1000);
-                    picked.query = query || '';
-
-                    closeModal();
-
-                    if (mode === 'list' && picked.ranked.length) return openList(movie, picked);
-
-                    if (!picked.best) return showNothing(movie, w, '', mode, picked);
-
-                    if (w.instant) {
-                        noty('Выбрано: ' + briefOf(picked.best));
-                        return launch(movie, picked, picked.best);
-                    }
-
-                    showResult(movie, picked, picked.best);
-                }, function (err) {
-                    fail(TXT.parserError + (err ? ': ' + shortText(err, 120) : ''));
-                });
+                L().Parser.get(searchObject(movie, season, query), function (json) { end(false, json); }, function (err) { end(true, err); });
             } catch (e) {
                 log('Parser.get: ' + e);
-                fail(TXT.parserError);
+                end(true, '');
             }
+        }
+
+        // Когда карточка открыта, парсер уже можно спросить: к нажатию «Лучшая раздача» ответ будет готов
+        function prefetchLater(root, movie) {
+            if (!prefetchOn() || !L().Parser) return;
+
+            setTimeout(function () {
+                if (!prefetchOn() || Object.keys(inflight).length) return;
+
+                var seasons = SP.isTv(movie) ? seasonList(movie) : [];
+                var season = seasons.length ? seasons[0].n : 0;
+
+                if (cachedResults(movie, season, '')) return;
+
+                runSearch(resultsKey(movie, season, ''), movie, season, '', []);
+            }, PREFETCH_DELAY);
         }
 
         // retry: если задан, парсер не ответил, и первой кнопкой идёт «Подобрать парсер»
@@ -3357,18 +4425,32 @@
             box.append(badges);
 
             box.append(h('div', 'lw-line', (S.formatSize(entry.item.Size) || '?') + ' · раздающих ' + entry.seeds + ' · ' + (entry.item.Tracker || '?')));
+            var heavy = reserveFor(entry, movie);
+
             box.append(forecastBlock(entry));
+
+            if (heavy) box.append(reserveBlock(heavy));
+
             box.append(checksBlock(entry, picked));
 
             var miss = entry === picked.best ? missedText(picked) : '';
 
             if (miss) box.append(h('div', 'lw-note', miss));
 
-            box.append(h('div', 'lw-stats', statsLine(picked.stats) + '. Поиск занял ' + (picked.seconds || 0) + ' с.'));
+            box.append(h('div', 'lw-stats', statsLine(picked.stats) + '. ' + (picked.ahead ? TXT.foundAhead : 'Поиск занял ' + (picked.seconds || 0) + ' с') + '.'));
 
-            var buttons = [
-                { name: TXT.launch, onSelect: function () { closeModal(); launch(movie, picked, entry); } }
-            ];
+            var buttons = [];
+
+            if (heavy) {
+                var easy = SP.lighter(picked.ranked, entry.est, entry);
+
+                buttons.push({ name: TXT.reserveGo, onSelect: function () { closeModal(); launch(movie, picked, entry, 'reserve'); } });
+                buttons.push({ name: TXT.now, onSelect: function () { closeModal(); launch(movie, picked, entry, 'now'); } });
+
+                if (easy) buttons.push({ name: TXT.lighterShort, onSelect: function () { showResult(movie, picked, easy); } });
+            } else {
+                buttons.push({ name: TXT.launch, onSelect: function () { closeModal(); launch(movie, picked, entry); } });
+            }
 
             if (picked.playable.length > 1) buttons.push({ name: TXT.others, onSelect: function () { showOthers(movie, picked, entry); } });
 
@@ -3746,7 +4828,8 @@
 
         // ---------------------------------------------------------------- запуск
 
-        function launch(movie, picked, entry) {
+        // mode: 'reserve' — при нехватке скорости сразу копить запас; 'now' и 'next' — без замера скорости
+        function launch(movie, picked, entry, mode) {
             var Torrent = L().Torrent;
 
             if (!Torrent || !Torrent.start) {
@@ -3758,7 +4841,9 @@
 
             element.poster = movie.img;
 
-            pending = { time: new Date().getTime(), movie: movie, picked: picked, entry: entry, wishes: picked.wishes, target: null, started: false };
+            if (LW.series && SP.isTv(movie) && picked.wishes && picked.wishes.episode > 0) LW.series.remember(movie, picked.wishes, element);
+
+            pending = { time: new Date().getTime(), movie: movie, picked: picked, entry: entry, wishes: picked.wishes, target: null, started: false, mode: mode || '' };
 
             // фильм: сразу известно, какой файл главный. Сериал: ищем нужную серию, когда Лампа отрисует список.
             try {
@@ -3789,6 +4874,7 @@
 
             if (e.type === 'list_open') {
                 if (!SP.isTv(pending.movie)) pending.target = chooseMainFile(e.items);
+                else if (pending.mode === 'next') missingLater(pending);
             } else if (e.type === 'render') {
                 var want = pending.wishes.episode;
                 var el = e.element;
@@ -3816,6 +4902,17 @@
 
                 pending = null;
             }
+        }
+
+        // Серии раздачи Лампа рисует сразу после list_open. Если к этому времени нужная не нашлась, говорим об этом и забываем раздачу
+        function missingLater(p) {
+            setTimeout(function () {
+                if (pending !== p || p.started) return;
+
+                noty(TXT.nextMissing + p.wishes.episode + '. Выберите «' + TXT.otherRelease + '»');
+
+                if (LW.series) LW.series.forget(p.movie);
+            }, MISSING_MS);
         }
 
         function measureUrl(url) {
@@ -3848,6 +4945,7 @@
             var url = measureUrl(element.url);
             var net = makeGet();
 
+            if (p.mode === 'now' || p.mode === 'next') return play(item);
             if (!url || !net) return play(item);
 
             var box = h('div', 'lw-box');
@@ -3918,6 +5016,8 @@
             if (res.ok) rememberLine(res);
 
             if (!res.ok) {
+                if (LW.health) LW.health.note('speed', 'Скорость раздачи измерить не удалось', 'Фильм запущен без проверки скорости');
+
                 noty('Скорость измерить не удалось, запускаю как есть');
                 return play(item);
             }
@@ -3929,11 +5029,27 @@
                 return play(item);
             }
 
-            showVerdict(p, element, item, res, v);
+            var rs = reserveAfterMeasure(p, res);
+
+            // человек уже выбрал «Накопить запас и смотреть»: второй раз не спрашиваем
+            if (p.mode === 'reserve' && rs.offer) return startReserve(p, element, item, res, rs);
+
+            showVerdict(p, element, item, res, v, rs);
         }
 
-        function showVerdict(p, element, item, res, v) {
+        // Запас по реальной скорости. offer: стоит предлагать. cap: сколько сервер вообще способен накопить (0 — неизвестно)
+        function reserveAfterMeasure(p, res) {
+            var r = SP.reserve(res.avgMbps, p.entry.need, SP.runtimeMin(p.movie));
+            var cap = res.preloadSize || 0;
+            var low = r.needed && cap > 0 && cap < r.bytes * 0.5;
+
+            return { r: r, cap: cap, capLow: low, offer: r.needed && r.feasible && !low };
+        }
+
+        function showVerdict(p, element, item, res, v, rs) {
             var entry = p.entry;
+
+            rs = rs || reserveAfterMeasure(p, res);
             var info = VERDICT[v.level] || VERDICT.unknown;
             var box = h('div', 'lw-box');
             var verdictBox = h('div', 'lw-verdict lw-verdict--' + info.cls);
@@ -3947,8 +5063,14 @@
             var tipKeys = SP.tips(v, { seeders: res.seeders, peers: res.peers, need: entry.need, have: res.avgMbps });
             var tips = $('<ul class="lw-tips"></ul>');
 
+            // с готовым запасом совет «подождать» заменён блоком ниже; если сервер столько не накопит, говорим об этом
+            if (rs.offer) tipKeys = tipKeys.filter(function (k) { return k !== 'wait'; });
+            if (rs.capLow) tipKeys.unshift('reserveCap');
+
+            if (rs.offer) box.append(reserveBlock(rs.r));
+
             tipKeys.slice(0, 4).forEach(function (k) {
-                if (TIPS[k]) tips.append(h('li', '', TIPS[k](v)));
+                if (TIPS[k]) tips.append(h('li', '', TIPS[k](v, rs)));
             });
 
             if (tips.children().length) box.append(tips);
@@ -3968,6 +5090,8 @@
 
             var anyway = { name: v.level === 'edge' ? TXT.watch : TXT.anyway, onSelect: function () { closeModal(); play(item); } };
 
+            if (rs.offer) buttons.push({ name: TXT.reserveGo, onSelect: function () { closeModal(); startReserve(p, element, item, res, rs); } });
+
             if (v.level === 'edge') {
                 buttons.push(anyway);
 
@@ -3981,6 +5105,103 @@
             buttons.push({ name: TXT.back, onSelect: function () { closeModal(); dropTorrent(function () { showResult(p.movie, p.picked, entry); }); } });
 
             openModal({ title: '', html: box, buttons: buttons, onBack: function () { closeModal(); } });
+        }
+
+        function pairSize(a, b) {
+            if (b >= 1e9) return gbText(a / 1e9) + ' из ' + gbText(b / 1e9) + ' ГБ';
+
+            return Math.round(a / 1e6) + ' из ' + Math.round(b / 1e6) + ' МБ';
+        }
+
+        // ~1 мин 20 с, ~45 с
+        function etaText(sec) {
+            if (!(sec > 0)) return '—';
+            if (sec < 60) return '~' + sec + ' с';
+
+            var m = Math.floor(sec / 60);
+            var s = Math.round((sec % 60) / 5) * 5;
+
+            if (s === 60) { m++; s = 0; }
+
+            return '~' + m + ' мин' + (s ? ' ' + s + ' с' : '');
+        }
+
+        // Экран «Копим запас»: TorrServer качает начало файла, мы показываем, сколько накоплено, и запускаем плеер сами
+        function startReserve(p, element, item, res, rs) {
+            var url = measureUrl(element.url);
+            var net = makeGet();
+            var entry = p.entry;
+
+            if (!url || !net) return play(item);
+
+            var finished = false;
+            var box = h('div', 'lw-box lw-box--reserve');
+            var big = h('div', 'lw-big');
+            var num = h('span', 'lw-big__n', '0');
+            var bar = $('<div class="lw-bar"><i style="width:0"></i></div>');
+            var cards = h('div', 'lw-cards lw-cards--three');
+            var saved = statCard('0', TXT.reserveSaved);
+            var speed = statCard('—', TXT.reserveSpeed);
+            var eta = statCard('—', TXT.reserveEta);
+            var capNote = null;
+
+            big.append(num).append(h('small', '', '%'));
+            box.append(big);
+            box.append(h('div', 'lw-kicker', TXT.reserveKicker));
+            box.append(h('div', 'lw-title', TXT.reserveTitle));
+            box.append(h('div', 'lw-line', shortText(entry.item.Title, 90) + '. Как только запаса хватит, плеер запустится сам.'));
+            box.append(bar);
+            cards.append(saved).append(speed).append(eta);
+            box.append(cards);
+
+            function stop() {
+                finished = true;
+
+                if (cancelMeasure) cancelMeasure();
+
+                cancelMeasure = null;
+                net.clear();
+            }
+
+            openModal({
+                title: '',
+                html: box,
+                size: 'large',
+                buttons: [
+                    { name: TXT.reserveNow, onSelect: function () { stop(); closeModal(); play(item); } },
+                    { name: TXT.cancel, onSelect: function () { stop(); closeModal(); dropTorrent(function () {}); } }
+                ],
+                onBack: function () { stop(); closeModal(); }
+            });
+
+            cancelMeasure = SP.accumulate({ url: url, get: net.get, targetBytes: rs.r.bytes, interval: TICK_MS, maxMs: CFG.reserveMaxMs, stallMs: CFG.reserveStallMs }, function (out) {
+                if (finished) return;
+
+                finished = true;
+                cancelMeasure = null;
+                net.clear();
+                closeModal();
+
+                if (out.reason === 'cancel') return;
+
+                if (out.reason === 'ready') noty('Запас накоплен: ' + S.formatSize(out.preloaded) + '. Запускаю');
+                else noty('Запас перестал расти (' + S.formatSize(out.preloaded) + '), запускаю с тем, что есть');
+
+                play(item);
+            }, function (s) {
+                if (finished) return;
+
+                num.text(String(s.pct));
+                bar.find('i').css('width', s.pct + '%');
+                saved.find('b').text(pairSize(s.preloaded, s.target));
+                speed.find('b').text(s.mbps + ' Мбит/с');
+                eta.find('b').text(etaText(s.etaSec));
+
+                if (s.capped && !capNote) {
+                    capNote = h('div', 'lw-note', TXT.reserveCapNote);
+                    box.append(capNote);
+                }
+            });
         }
 
         // Закрыть окно со списком файлов у Лампы: она сама остановит торрент и вернёт фокус
@@ -4002,6 +5223,10 @@
 
                 Lampa.Listener.follow('full', addButton);
                 Lampa.Listener.follow('torrent_file', onTorrentFile);
+
+                try {
+                    if (Lampa.Player && Lampa.Player.listener) Lampa.Player.listener.follow('destroy', function () { setTimeout(refreshNext, 400); });
+                } catch (e2) {}
             } catch (e) {
                 log('start: ' + e);
             }
@@ -4013,7 +5238,7 @@
         });
 
         LW.ui = { h: h, openModal: openModal, closeModal: closeModal, noty: noty, shortText: shortText, log: log };
-        LW.watch = { start: start, openWishes: openWishes, addButton: addButton };
+        LW.watch = { start: start, openWishes: openWishes, addButton: addButton, prefetchOn: prefetchOn, cachedResults: cachedResults, playNext: playNext, refreshNext: refreshNext };
     });
 
     run('setup', function (LW) {
@@ -4047,6 +5272,8 @@
             copyFrom: 'Копия от',
             auto: 'Чинить парсер автоматически',
             autoDescr: 'Если парсер не отвечает при поиске раздачи, плагин сам подберёт другой и повторит поиск.',
+            prefetch: 'Искать раздачи заранее',
+            prefetchDescr: 'Когда открыта карточка фильма, плагин заранее спрашивает парсер, и «Лучшая раздача» открывается сразу, без ожидания поиска. Выключите, если парсер платный или медленный.',
             searching: 'Подбираю парсер',
             searchingAuto: 'Парсер не отвечает, подбираю другой',
             searchingSub: 'Проверяю, какие парсеры отвечают на этом устройстве, и сравниваю их по тестовому запросу',
@@ -4482,6 +5709,8 @@
             function showError(err, written) {
                 var box = U.h('div', 'lw-box');
 
+                if (LW.health) LW.health.note('tune', TXT.tuneErrTitle + ': ' + err);
+
                 box.append(U.h('div', 'lw-title', TXT.tuneErrTitle));
                 box.append(U.h('div', 'lw-line', err));
 
@@ -4605,6 +5834,9 @@
                 icon: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8.5 11.2l1.8 1.8 3.4-3.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
             });
 
+            // «Диагностика и обновление» первой строкой: с неё начинают, когда что-то не работает
+            if (LW.health) LW.health.addSettings(api);
+
             api.addParam({ component: 'lampa_watch', param: { name: 'lw_parser_title', type: 'title' }, field: { name: TXT.parserTitle } });
 
             api.addParam({
@@ -4627,6 +5859,12 @@
                 component: 'lampa_watch',
                 param: { name: AUTO_KEY, type: 'trigger', default: true },
                 field: { name: TXT.auto, description: TXT.autoDescr }
+            });
+
+            api.addParam({
+                component: 'lampa_watch',
+                param: { name: 'lw_prefetch', type: 'trigger', default: true },
+                field: { name: TXT.prefetch, description: TXT.prefetchDescr }
             });
 
             if (!T) return;

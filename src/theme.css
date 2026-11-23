@@ -91,10 +91,13 @@ body.lw-theme .torrent-item__seeds span{color:#5fe39a}
 body.lw-theme .simple-button{border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12)}
 
 /* ---------- кнопка «Лучшая раздача» на карточке: подпись видна всегда (Лампа прячет её без фокуса) ---------- */
-body.lw-theme .full-start-new__buttons .lw-watch-btn span{display:inline}
-body.lw-theme .lw-watch-btn{background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.03));border-color:var(--edge);color:var(--ink)}
-body.lw-theme .lw-watch-btn svg{color:var(--word)}
-body.lw-theme .lw-watch-btn.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06));box-shadow:inset 0 0 0 .09em var(--edge)}
+body.lw-theme .full-start-new__buttons .lw-watch-btn span,body.lw-theme .full-start-new__buttons .lw-next-btn span{display:inline}
+body.lw-theme .lw-watch-btn,body.lw-theme .lw-next-btn{background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.03));border-color:var(--edge);color:var(--ink)}
+body.lw-theme .lw-watch-btn svg,body.lw-theme .lw-next-btn svg{color:var(--word)}
+body.lw-theme .lw-watch-btn.focus,body.lw-theme .lw-next-btn.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06));box-shadow:inset 0 0 0 .09em var(--edge)}
+/* «Серия N · та же раздача» главная: залита акцентом, «Другая раздача» рядом остаётся контурной */
+body.lw-theme .lw-next-btn{background:linear-gradient(155deg,var(--mid),var(--deep))}
+body.lw-theme .lw-next-btn.focus{background:linear-gradient(155deg,var(--mid),var(--deep));box-shadow:inset 0 0 0 .09em var(--edge),0 0 0 .12em var(--glow)}
 
 /* ---------- окна Lampa Watch: общий каркас ---------- */
 body.lw-theme .modal__footer{flex-wrap:wrap;gap:.7em;padding-top:1.4em}
@@ -237,6 +240,22 @@ body.lw-theme .settings-input__input{font-weight:300;letter-spacing:-.03em;borde
 body.lw-theme .settings-input__input.filled::after{border-right-color:var(--edge)}
 body.lw-theme .settings-input__links{background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--line)}
 body.lw-theme .settings-input__links.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06) 70%);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}
+
+/* ---------- диагностика: плитки с состоянием ---------- */
+body.lw-theme .lw-dgc{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025))}
+body.lw-theme .lw-dgc[data-level=warn]{border-color:rgba(255,210,90,.4)}
+body.lw-theme .lw-dgc[data-level=bad]{border-color:rgba(255,107,107,.5)}
+body.lw-theme .lw-dgc__l{color:var(--dim);opacity:1;letter-spacing:.2em}
+body.lw-theme .lw-dgc__w{color:var(--ink);opacity:.8}
+body.lw-theme .lw-dgc__v{font-weight:300;letter-spacing:-.02em;color:var(--ink)}
+body.lw-theme .lw-dgc__s{color:var(--dim);opacity:1}
+
+/* ---------- запас перед стартом ---------- */
+body.lw-theme .lw-reserve{padding:.8em 1.1em;margin-bottom:.8em;border:1px solid rgba(255,157,77,.5);border-radius:1.1em;background:rgba(255,157,77,.09);color:var(--dim)}
+body.lw-theme .lw-reserve b{display:block;margin-bottom:.2em;font-size:1.15em;font-weight:400;color:var(--lag)}
+body.lw-theme .lw-big{font-size:7em;font-weight:200;letter-spacing:-.06em;line-height:1;margin:0 0 .15em;color:var(--ink)}
+body.lw-theme .lw-big small{font-size:.35em;letter-spacing:0;color:var(--word);opacity:1}
+body.lw-theme .lw-cards--three .lw-card{flex:1 1 0;min-width:0}
 
 /* ---------- защита OLED ---------- */
 body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}

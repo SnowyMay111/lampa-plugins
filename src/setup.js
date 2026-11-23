@@ -26,6 +26,8 @@ var TXT = {
     copyFrom: 'Копия от',
     auto: 'Чинить парсер автоматически',
     autoDescr: 'Если парсер не отвечает при поиске раздачи, плагин сам подберёт другой и повторит поиск.',
+    prefetch: 'Искать раздачи заранее',
+    prefetchDescr: 'Когда открыта карточка фильма, плагин заранее спрашивает парсер, и «Лучшая раздача» открывается сразу, без ожидания поиска. Выключите, если парсер платный или медленный.',
     searching: 'Подбираю парсер',
     searchingAuto: 'Парсер не отвечает, подбираю другой',
     searchingSub: 'Проверяю, какие парсеры отвечают на этом устройстве, и сравниваю их по тестовому запросу',
@@ -461,6 +463,8 @@ function openTune(opts) {
     function showError(err, written) {
         var box = U.h('div', 'lw-box');
 
+        if (LW.health) LW.health.note('tune', TXT.tuneErrTitle + ': ' + err);
+
         box.append(U.h('div', 'lw-title', TXT.tuneErrTitle));
         box.append(U.h('div', 'lw-line', err));
 
@@ -584,6 +588,9 @@ function addSettings() {
         icon: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8.5 11.2l1.8 1.8 3.4-3.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
     });
 
+    // «Диагностика и обновление» первой строкой: с неё начинают, когда что-то не работает
+    if (LW.health) LW.health.addSettings(api);
+
     api.addParam({ component: 'lampa_watch', param: { name: 'lw_parser_title', type: 'title' }, field: { name: TXT.parserTitle } });
 
     api.addParam({
@@ -606,6 +613,12 @@ function addSettings() {
         component: 'lampa_watch',
         param: { name: AUTO_KEY, type: 'trigger', default: true },
         field: { name: TXT.auto, description: TXT.autoDescr }
+    });
+
+    api.addParam({
+        component: 'lampa_watch',
+        param: { name: 'lw_prefetch', type: 'trigger', default: true },
+        field: { name: TXT.prefetch, description: TXT.prefetchDescr }
     });
 
     if (!T) return;

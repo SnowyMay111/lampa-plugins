@@ -251,7 +251,7 @@ async function test(name, fn) {
         const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
         const watch = fs.readFileSync(path.join(SRC, 'watch.js'), 'utf8');
 
-        assert.ok(/body\.lw-theme \.full-start-new__buttons \.lw-watch-btn span\{display:inline\}/.test(css.replace(/\s+/g, ' ').replace(/\s*([{};])\s*/g, '$1')), 'подпись кнопки включена');
+        assert.ok(/body\.lw-theme \.full-start-new__buttons \.lw-watch-btn span,body\.lw-theme \.full-start-new__buttons \.lw-next-btn span\{display:inline\}/.test(css.replace(/\s+/g, ' ').replace(/\s*([{};])\s*/g, '$1')), 'подпись кнопки включена');
         assert.ok(/\.lw-box--wishes\{[^}]*display:grid/.test(css), 'пожелания: сетка');
         assert.ok(watch.indexOf("'lw-box lw-box--wishes'") >= 0, 'окно пожеланий помечено классом');
     });
@@ -301,6 +301,34 @@ async function test(name, fn) {
 
         assert.ok(/linear-gradient/.test(rule('body.lw-theme .search-source.active')), 'активный источник: градиент акцента, а не белая заливка');
         assert.ok(/background:#000!important/.test(rule('body.lw-theme .settings-input__content,body.lw-theme.glass--style .settings-input__content')), 'окно ввода: чистый чёрный');
+    });
+
+    await test('четыре функции: кнопка «Серия N», запас, плитки диагностики оформлены, без белого и размытия', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+        const rule = (sel) => {
+            const i = css.indexOf(sel + '{');
+
+            assert.ok(i >= 0, 'нет правила ' + sel);
+
+            return css.slice(i, css.indexOf('}', i) + 1);
+        };
+
+        assert.ok(/\n\s*body\.lw-theme \.lw-next-btn\s*\{[^}]*linear-gradient\(155deg,\s*var\(--mid\),\s*var\(--deep\)\)/.test(css), 'главная кнопка серии залита акцентом');
+        assert.ok(/box-shadow:inset 0 0 0 \.09em var\(--edge\)/.test(rule('body.lw-theme .lw-next-btn.focus')), 'у выбранной рамка акцента');
+        assert.ok(/border:1px solid rgba\(255,157,77/.test(rule('body.lw-theme .lw-reserve')), 'блок «нужен запас» оранжевый, как «скорее будет лагать»');
+        assert.ok(/font-size:7em/.test(rule('body.lw-theme .lw-big')), 'большой процент на экране запаса');
+        assert.ok(/border:1px solid var\(--line\)/.test(rule('body.lw-theme .lw-dgc')), 'плитка диагностики');
+        assert.ok(/rgba\(255,107,107/.test(rule('body.lw-theme .lw-dgc[data-level=bad]')) && /rgba\(255,210,90/.test(rule('body.lw-theme .lw-dgc[data-level=warn]')), 'рамка плитки меняется со статусом');
+    });
+
+    await test('четыре функции: у окон плагина нет белой заливки и анимаций размеров', () => {
+        const health = fs.readFileSync(path.join(SRC, 'health.js'), 'utf8');
+        const watch = fs.readFileSync(path.join(SRC, 'watch.js'), 'utf8');
+
+        // у watch.js белый выбор остаётся только для обычного вида: тема его перекрывает (это проверяют тесты выше)
+        assert.ok(!/background:\s*#fff\b/i.test(health), 'белый фон в стилях диагностики');
+        assert.ok(!/backdrop-filter|blur\(|transition\s*:\s*(width|height)/.test(health), 'размытие или анимация размера в диагностике');
+        assert.ok(!/backdrop-filter|blur\(/.test(watch), 'размытие в стилях плагина');
     });
 
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));

@@ -18,6 +18,7 @@ var LL = LW.list;
 var STORE_WISHES = 'lw_wishes';
 var STORE_LINE = 'lw_line_peak';
 var STORE_SORT = 'lw_sort';
+var STORE_PREFETCH = 'lw_prefetch';
 var PAGE = 40; // сколько раздач показываем сразу, остальные по кнопке «Показать ещё»
 var CFG = window.lampa_watch_config || {}; // для тестов: сокращает паузы
 var PENDING_TTL = 110000; // дольше этого торрент не ждём: Лампа сама сдаётся через 90 секунд
@@ -25,11 +26,16 @@ var MEASURE_MS = CFG.measureMs || 12000;
 var WARMUP_MS = CFG.warmup === undefined ? 3000 : CFG.warmup;
 var TICK_MS = CFG.interval || 1000;
 var SETTLE_MS = CFG.settle === undefined ? 150 : CFG.settle;
+var PREFETCH_DELAY = CFG.prefetchDelay === undefined ? 2000 : CFG.prefetchDelay; // даём карточке отрисоваться, потом ищем
+var PREFETCH_TTL = 10 * 60 * 1000;   // найденное заранее считаем свежим 10 минут
+var MISSING_MS = CFG.missingMs === undefined ? 3500 : CFG.missingMs; // через сколько говорим, что нужной серии в раздаче нет
 
 var pending = null;       // запуск, начатый нами: ждём список файлов и нажимаем нужный
 var cancelMeasure = null; // остановить идущий замер
 var runId = 0;            // номер поиска: поздний ответ отменённого поиска игнорируется
 var listModal = null;     // параметры открытого окна со списком: по ним его можно перерисовать на месте
+var found = {};           // что парсер вернул заранее: ключ «фильм|сезон|запрос» → { at, json }
+var inflight = {};        // поиски, которые идут прямо сейчас: ключ → ожидающие ответа
 
 // ---------------------------------------------------------------- тексты и варианты
 
@@ -76,7 +82,21 @@ var TXT = {
     anyway: 'Всё равно смотреть',
     watch: 'Смотреть',
     lighter: 'Взять версию полегче',
-    cancel: 'Отмена'
+    lighterShort: 'Версия полегче',
+    cancel: 'Отмена',
+    otherRelease: 'Другая раздача',
+    nextMissing: 'В этой раздаче нет серии ',
+    foundAhead: 'Раздачи найдены заранее',
+    reserveGo: 'Накопить запас и смотреть',
+    now: 'Запустить сразу',
+    reserveNeed: 'Нужен запас перед стартом',
+    reserveKicker: 'Запас перед стартом',
+    reserveTitle: 'Копим запас',
+    reserveNow: 'Начать сейчас',
+    reserveSaved: 'накоплено',
+    reserveSpeed: 'скорость',
+    reserveEta: 'до старта',
+    reserveCapNote: 'Предел задаёт настройка предзагрузки TorrServer: больше он копить не станет.'
 };
 
 var OPTIONS = {
@@ -124,7 +144,8 @@ var TIPS = {
     wait: function (v) { return 'Если запустить и подождать около ' + v.waitMin + ' мин, запас накопится и дальше пойдёт без пауз.'; },
     cache: function () { return 'Увеличьте кэш TorrServer (в его настройках «Размер кэша» 512 МБ и больше): запас буфера сгладит провалы скорости.'; },
     wired: function () { return 'Для такого тяжёлого файла нужна быстрая сеть: проводное подключение или Wi-Fi 5 ГГц и на телевизоре, и на компьютере с TorrServer.'; },
-    otherDownloads: function () { return 'Закройте другие загрузки и VPN на компьютере с TorrServer: они забирают скорость.'; }
+    otherDownloads: function () { return 'Закройте другие загрузки и VPN на компьютере с TorrServer: они забирают скорость.'; },
+    reserveCap: function (v, rs) { return 'TorrServer копит запас только до ' + S.formatSize(rs.cap) + ', а нужно около ' + S.formatSize(rs.r.bytes) + '. Увеличьте кеш и предзагрузку в настройках TorrServer (кнопка «Настроить TorrServer»).'; }
 };
 
 // ---------------------------------------------------------------- вспомогательное
@@ -135,6 +156,9 @@ function L() {
 
 function log(msg) {
     try { if (window.console) console.log('[lampa-watch] ' + msg); } catch (e) {}
+
+    // log зовут только при сбоях: они же попадают в «Диагностику»
+    if (LW.health) LW.health.note('watch', msg);
 }
 
 function noty(text) {
@@ -280,6 +304,11 @@ function addStyle() {
         '.lw-tips{margin:.6em 0 0;padding-left:1.2em}',
         '.lw-tips li{margin:.4em 0;line-height:1.35}',
         '.lw-stats{opacity:.6;font-size:.9em;margin-top:.8em;line-height:1.5}',
+        '.lw-reserve{padding:.7em 1em;border-radius:.6em;margin-bottom:.8em;border-left:.3em solid #f2994a;background:rgba(242,153,74,.16)}',
+        '.lw-reserve b{display:block;margin-bottom:.2em;font-size:1.1em}',
+        '.lw-big{font-size:5em;font-weight:200;line-height:1;margin:.05em 0 .15em}',
+        '.lw-big small{font-size:.4em;margin-left:.1em;opacity:.6}',
+        '.lw-cards--three .lw-card{flex:1 1 0;min-width:0}',
         '.lw-bar{height:.5em;border-radius:.25em;background:rgba(255,255,255,.12);overflow:hidden;margin:.9em 0}',
         '.lw-bar i{display:block;height:100%;width:0;background:#2f6fe4;transition:width .4s}',
         '.lw-live{font-size:1.1em;line-height:1.6}',
@@ -384,6 +413,22 @@ function forecastBlock(entry) {
     return box;
 }
 
+// Тяжёлая раздача: прикидка говорит, что скорости не хватит, но запас перед стартом это решает
+function reserveFor(entry, movie) {
+    var r = SP.reserve(entry.est, entry.need, SP.runtimeMin(movie));
+
+    return r.needed && r.feasible ? r : null;
+}
+
+function reserveBlock(r) {
+    var box = h('div', 'lw-reserve');
+
+    box.append(h('b', '', TXT.reserveNeed));
+    box.append(h('div', '', 'Без запаса будет лагать. Если накопить около ' + S.formatSize(r.bytes) + ' (≈ ' + r.waitMin + ' мин), досмотрите до конца без пауз.'));
+
+    return box;
+}
+
 function checksBlock(entry, picked) {
     var box = h('div', 'lw-checks');
     var shown = 0;
@@ -451,6 +496,80 @@ function addButton(e) {
     } else {
         root.find('.view--torrent').after(btn);
     }
+
+    root.data('lw-movie', movie);
+    paintNext(root, movie);
+    prefetchLater(root, movie);
+}
+
+// ---------------------------------------------------------------- сериал: следующая серия
+
+// Что предложить для сериала: запись о раздаче, процент просмотра и следующий шаг
+function nextFor(movie) {
+    if (!LW.series || !SP.isTv(movie)) return null;
+
+    var rec = LW.series.get(movie);
+
+    if (!rec) return null;
+
+    var eps = 0;
+
+    seasonList(movie).forEach(function (x) { if (x.n === rec.season) eps = x.episodes; });
+
+    var st = LW.series.step(rec, LW.series.watchedPercent(movie, rec.season, rec.episode), eps);
+
+    return st ? { rec: rec, step: st } : null;
+}
+
+// Кнопка «Серия N · та же раздача» перед «Лучшая раздача»; саму её тогда зовём «Другая раздача»
+function paintNext(root, movie) {
+    var watch = root.find('.lw-watch-btn');
+    var next = root.find('.lw-next-btn');
+    var n = nextFor(movie);
+
+    if (!watch.length) return;
+
+    if (!n) {
+        next.remove();
+        watch.find('span').text(TXT.button);
+        return;
+    }
+
+    if (!next.length) {
+        next = $('<div class="full-start__button selector lw-next-btn"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span></span></div>');
+        next.on('hover:enter', function () { playNext(movie); });
+        watch.before(next);
+    }
+
+    next.find('span').text(LW.series.label(n.step));
+    watch.find('span').text(TXT.otherRelease);
+}
+
+function playNext(movie) {
+    var n = nextFor(movie);
+
+    if (!n) return openWishes(movie);
+
+    var w = loadWishes();
+
+    w.season = n.step.season;
+    w.episode = n.step.episode;
+
+    var entry = S.evaluate(n.rec.item, w, movie);
+    var picked = { wishes: w, best: entry, ranked: [entry], playable: [entry], missed: [], stats: { total: 1, usable: 1, quality: {}, tracker: {} } };
+
+    noty('Серия ' + w.episode + ' · ' + briefOf(entry));
+    launch(movie, picked, entry, 'next');
+}
+
+// Вернулись с просмотра на карточку: надписи на кнопках могли устареть
+function refreshNext() {
+    try {
+        var root = $('.activity--active');
+        var movie = root.data('lw-movie');
+
+        if (movie) paintNext(root, movie);
+    } catch (e) {}
 }
 
 // ---------------------------------------------------------------- пожелания
@@ -570,6 +689,35 @@ function findAndWatch(movie, w, mode, query, repaired) {
 
     saveWishes(w);
 
+    // Общая часть: у нас есть ответ парсера (свой или найденный заранее), выбираем лучшую раздачу.
+    function onResults(json, ahead) {
+        if (my !== runId) return;
+
+        var picked = S.pick((json && json.Results) || [], w, movie);
+
+        picked.seconds = ahead ? 0 : Math.round((new Date().getTime() - started) / 1000);
+        picked.ahead = !!ahead;
+        picked.query = query || '';
+
+        if (!ahead) closeModal();
+
+        if (mode === 'list' && picked.ranked.length) return openList(movie, picked);
+
+        if (!picked.best) return showNothing(movie, w, '', mode, picked);
+
+        if (w.instant) {
+            noty('Выбрано: ' + briefOf(picked.best));
+            return launch(movie, picked, picked.best);
+        }
+
+        showResult(movie, picked, picked.best);
+    }
+
+    // Раздачи уже найдены заранее: экран поиска не нужен. После подбора парсера (repaired) старому ответу не верим.
+    var ahead = repaired ? null : cachedResults(movie, w.season, query);
+
+    if (ahead) return onResults(ahead, true);
+
     var box = h('div', 'lw-box');
 
     box.append(h('div', 'lw-title', TXT.searching));
@@ -595,6 +743,8 @@ function findAndWatch(movie, w, mode, query, repaired) {
 
         closeModal();
 
+        if (LW.health) LW.health.note('parser', text);
+
         // парсер молчит: подбираем другой сами и повторяем поиск; не вышло или выключено — даём кнопку
         var again = function () { findAndWatch(movie, w, mode, query, true); };
 
@@ -602,7 +752,12 @@ function findAndWatch(movie, w, mode, query, repaired) {
             LW.setup.repairParser(function (status) {
                 if (my !== runId) return;
 
-                if (status === 'applied') return again();
+                if (status === 'applied') {
+                    if (LW.health) LW.health.note('parser', text, 'Плагин сам подобрал другой парсер и повторил поиск');
+
+                    return again();
+                }
+
                 if (status === 'cancel') return backToContent();
 
                 showNothing(movie, w, text, mode, null, again);
@@ -614,34 +769,84 @@ function findAndWatch(movie, w, mode, query, repaired) {
         showNothing(movie, w, text, mode, null, LW.setup ? again : null);
     }
 
+    getResults(movie, w.season, query, !!repaired, function (json) { onResults(json, false); }, function (err) {
+        fail(TXT.parserError + (err ? ': ' + shortText(err, 120) : ''));
+    });
+}
+
+// ---------------------------------------------------------------- поиск заранее
+
+function prefetchOn() {
+    var v;
+
+    try { v = L().Storage.get(STORE_PREFETCH, true); } catch (e) { return true; }
+
+    return !(v === false || v === 'false');
+}
+
+function resultsKey(movie, season, query) {
+    return (movie && movie.id ? movie.id : '') + '|' + (season || 0) + '|' + (query || '');
+}
+
+function cachedResults(movie, season, query) {
+    var hit = found[resultsKey(movie, season, query)];
+
+    return hit && new Date().getTime() - hit.at < PREFETCH_TTL ? hit.json : null;
+}
+
+// Один запрос на ключ. Если такой поиск уже идёт (например, начатый заранее), присоединяемся к нему, а не гоняем парсер ещё раз.
+// fresh: игнорировать идущий поиск (после подбора парсера).
+function getResults(movie, season, query, fresh, ok, fail) {
+    var key = resultsKey(movie, season, query);
+
+    if (!fresh && inflight[key]) {
+        inflight[key].push({ ok: ok, fail: fail });
+        return;
+    }
+
+    runSearch(key, movie, season, query, [{ ok: ok, fail: fail }]);
+}
+
+function runSearch(key, movie, season, query, waiters) {
+    inflight[key] = waiters;
+
+    function end(failed, value) {
+        var list = inflight[key] || [];
+        var t = new Date().getTime();
+
+        delete inflight[key];
+
+        // пустой ответ не запоминаем: парсер мог просто моргнуть
+        if (!failed && value && value.Results && value.Results.length) {
+            Object.keys(found).forEach(function (k) { if (t - found[k].at >= PREFETCH_TTL) delete found[k]; });
+            found[key] = { at: t, json: value };
+        }
+
+        list.forEach(function (x) { if (failed) x.fail(value); else x.ok(value); });
+    }
+
     try {
-        L().Parser.get(searchObject(movie, w.season, query), function (json) {
-            if (my !== runId) return;
-
-            var picked = S.pick((json && json.Results) || [], w, movie);
-
-            picked.seconds = Math.round((new Date().getTime() - started) / 1000);
-            picked.query = query || '';
-
-            closeModal();
-
-            if (mode === 'list' && picked.ranked.length) return openList(movie, picked);
-
-            if (!picked.best) return showNothing(movie, w, '', mode, picked);
-
-            if (w.instant) {
-                noty('Выбрано: ' + briefOf(picked.best));
-                return launch(movie, picked, picked.best);
-            }
-
-            showResult(movie, picked, picked.best);
-        }, function (err) {
-            fail(TXT.parserError + (err ? ': ' + shortText(err, 120) : ''));
-        });
+        L().Parser.get(searchObject(movie, season, query), function (json) { end(false, json); }, function (err) { end(true, err); });
     } catch (e) {
         log('Parser.get: ' + e);
-        fail(TXT.parserError);
+        end(true, '');
     }
+}
+
+// Когда карточка открыта, парсер уже можно спросить: к нажатию «Лучшая раздача» ответ будет готов
+function prefetchLater(root, movie) {
+    if (!prefetchOn() || !L().Parser) return;
+
+    setTimeout(function () {
+        if (!prefetchOn() || Object.keys(inflight).length) return;
+
+        var seasons = SP.isTv(movie) ? seasonList(movie) : [];
+        var season = seasons.length ? seasons[0].n : 0;
+
+        if (cachedResults(movie, season, '')) return;
+
+        runSearch(resultsKey(movie, season, ''), movie, season, '', []);
+    }, PREFETCH_DELAY);
 }
 
 // retry: если задан, парсер не ответил, и первой кнопкой идёт «Подобрать парсер»
@@ -694,18 +899,32 @@ function showResult(movie, picked, entry) {
     box.append(badges);
 
     box.append(h('div', 'lw-line', (S.formatSize(entry.item.Size) || '?') + ' · раздающих ' + entry.seeds + ' · ' + (entry.item.Tracker || '?')));
+    var heavy = reserveFor(entry, movie);
+
     box.append(forecastBlock(entry));
+
+    if (heavy) box.append(reserveBlock(heavy));
+
     box.append(checksBlock(entry, picked));
 
     var miss = entry === picked.best ? missedText(picked) : '';
 
     if (miss) box.append(h('div', 'lw-note', miss));
 
-    box.append(h('div', 'lw-stats', statsLine(picked.stats) + '. Поиск занял ' + (picked.seconds || 0) + ' с.'));
+    box.append(h('div', 'lw-stats', statsLine(picked.stats) + '. ' + (picked.ahead ? TXT.foundAhead : 'Поиск занял ' + (picked.seconds || 0) + ' с') + '.'));
 
-    var buttons = [
-        { name: TXT.launch, onSelect: function () { closeModal(); launch(movie, picked, entry); } }
-    ];
+    var buttons = [];
+
+    if (heavy) {
+        var easy = SP.lighter(picked.ranked, entry.est, entry);
+
+        buttons.push({ name: TXT.reserveGo, onSelect: function () { closeModal(); launch(movie, picked, entry, 'reserve'); } });
+        buttons.push({ name: TXT.now, onSelect: function () { closeModal(); launch(movie, picked, entry, 'now'); } });
+
+        if (easy) buttons.push({ name: TXT.lighterShort, onSelect: function () { showResult(movie, picked, easy); } });
+    } else {
+        buttons.push({ name: TXT.launch, onSelect: function () { closeModal(); launch(movie, picked, entry); } });
+    }
 
     if (picked.playable.length > 1) buttons.push({ name: TXT.others, onSelect: function () { showOthers(movie, picked, entry); } });
 
@@ -1083,7 +1302,8 @@ function refineSearch(movie, picked, w, mode) {
 
 // ---------------------------------------------------------------- запуск
 
-function launch(movie, picked, entry) {
+// mode: 'reserve' — при нехватке скорости сразу копить запас; 'now' и 'next' — без замера скорости
+function launch(movie, picked, entry, mode) {
     var Torrent = L().Torrent;
 
     if (!Torrent || !Torrent.start) {
@@ -1095,7 +1315,9 @@ function launch(movie, picked, entry) {
 
     element.poster = movie.img;
 
-    pending = { time: new Date().getTime(), movie: movie, picked: picked, entry: entry, wishes: picked.wishes, target: null, started: false };
+    if (LW.series && SP.isTv(movie) && picked.wishes && picked.wishes.episode > 0) LW.series.remember(movie, picked.wishes, element);
+
+    pending = { time: new Date().getTime(), movie: movie, picked: picked, entry: entry, wishes: picked.wishes, target: null, started: false, mode: mode || '' };
 
     // фильм: сразу известно, какой файл главный. Сериал: ищем нужную серию, когда Лампа отрисует список.
     try {
@@ -1126,6 +1348,7 @@ function onTorrentFile(e) {
 
     if (e.type === 'list_open') {
         if (!SP.isTv(pending.movie)) pending.target = chooseMainFile(e.items);
+        else if (pending.mode === 'next') missingLater(pending);
     } else if (e.type === 'render') {
         var want = pending.wishes.episode;
         var el = e.element;
@@ -1153,6 +1376,17 @@ function onTorrentFile(e) {
 
         pending = null;
     }
+}
+
+// Серии раздачи Лампа рисует сразу после list_open. Если к этому времени нужная не нашлась, говорим об этом и забываем раздачу
+function missingLater(p) {
+    setTimeout(function () {
+        if (pending !== p || p.started) return;
+
+        noty(TXT.nextMissing + p.wishes.episode + '. Выберите «' + TXT.otherRelease + '»');
+
+        if (LW.series) LW.series.forget(p.movie);
+    }, MISSING_MS);
 }
 
 function measureUrl(url) {
@@ -1185,6 +1419,7 @@ function check(p, element, item) {
     var url = measureUrl(element.url);
     var net = makeGet();
 
+    if (p.mode === 'now' || p.mode === 'next') return play(item);
     if (!url || !net) return play(item);
 
     var box = h('div', 'lw-box');
@@ -1255,6 +1490,8 @@ function verdictFlow(p, element, item, res) {
     if (res.ok) rememberLine(res);
 
     if (!res.ok) {
+        if (LW.health) LW.health.note('speed', 'Скорость раздачи измерить не удалось', 'Фильм запущен без проверки скорости');
+
         noty('Скорость измерить не удалось, запускаю как есть');
         return play(item);
     }
@@ -1266,11 +1503,27 @@ function verdictFlow(p, element, item, res) {
         return play(item);
     }
 
-    showVerdict(p, element, item, res, v);
+    var rs = reserveAfterMeasure(p, res);
+
+    // человек уже выбрал «Накопить запас и смотреть»: второй раз не спрашиваем
+    if (p.mode === 'reserve' && rs.offer) return startReserve(p, element, item, res, rs);
+
+    showVerdict(p, element, item, res, v, rs);
 }
 
-function showVerdict(p, element, item, res, v) {
+// Запас по реальной скорости. offer: стоит предлагать. cap: сколько сервер вообще способен накопить (0 — неизвестно)
+function reserveAfterMeasure(p, res) {
+    var r = SP.reserve(res.avgMbps, p.entry.need, SP.runtimeMin(p.movie));
+    var cap = res.preloadSize || 0;
+    var low = r.needed && cap > 0 && cap < r.bytes * 0.5;
+
+    return { r: r, cap: cap, capLow: low, offer: r.needed && r.feasible && !low };
+}
+
+function showVerdict(p, element, item, res, v, rs) {
     var entry = p.entry;
+
+    rs = rs || reserveAfterMeasure(p, res);
     var info = VERDICT[v.level] || VERDICT.unknown;
     var box = h('div', 'lw-box');
     var verdictBox = h('div', 'lw-verdict lw-verdict--' + info.cls);
@@ -1284,8 +1537,14 @@ function showVerdict(p, element, item, res, v) {
     var tipKeys = SP.tips(v, { seeders: res.seeders, peers: res.peers, need: entry.need, have: res.avgMbps });
     var tips = $('<ul class="lw-tips"></ul>');
 
+    // с готовым запасом совет «подождать» заменён блоком ниже; если сервер столько не накопит, говорим об этом
+    if (rs.offer) tipKeys = tipKeys.filter(function (k) { return k !== 'wait'; });
+    if (rs.capLow) tipKeys.unshift('reserveCap');
+
+    if (rs.offer) box.append(reserveBlock(rs.r));
+
     tipKeys.slice(0, 4).forEach(function (k) {
-        if (TIPS[k]) tips.append(h('li', '', TIPS[k](v)));
+        if (TIPS[k]) tips.append(h('li', '', TIPS[k](v, rs)));
     });
 
     if (tips.children().length) box.append(tips);
@@ -1305,6 +1564,8 @@ function showVerdict(p, element, item, res, v) {
 
     var anyway = { name: v.level === 'edge' ? TXT.watch : TXT.anyway, onSelect: function () { closeModal(); play(item); } };
 
+    if (rs.offer) buttons.push({ name: TXT.reserveGo, onSelect: function () { closeModal(); startReserve(p, element, item, res, rs); } });
+
     if (v.level === 'edge') {
         buttons.push(anyway);
 
@@ -1318,6 +1579,103 @@ function showVerdict(p, element, item, res, v) {
     buttons.push({ name: TXT.back, onSelect: function () { closeModal(); dropTorrent(function () { showResult(p.movie, p.picked, entry); }); } });
 
     openModal({ title: '', html: box, buttons: buttons, onBack: function () { closeModal(); } });
+}
+
+function pairSize(a, b) {
+    if (b >= 1e9) return gbText(a / 1e9) + ' из ' + gbText(b / 1e9) + ' ГБ';
+
+    return Math.round(a / 1e6) + ' из ' + Math.round(b / 1e6) + ' МБ';
+}
+
+// ~1 мин 20 с, ~45 с
+function etaText(sec) {
+    if (!(sec > 0)) return '—';
+    if (sec < 60) return '~' + sec + ' с';
+
+    var m = Math.floor(sec / 60);
+    var s = Math.round((sec % 60) / 5) * 5;
+
+    if (s === 60) { m++; s = 0; }
+
+    return '~' + m + ' мин' + (s ? ' ' + s + ' с' : '');
+}
+
+// Экран «Копим запас»: TorrServer качает начало файла, мы показываем, сколько накоплено, и запускаем плеер сами
+function startReserve(p, element, item, res, rs) {
+    var url = measureUrl(element.url);
+    var net = makeGet();
+    var entry = p.entry;
+
+    if (!url || !net) return play(item);
+
+    var finished = false;
+    var box = h('div', 'lw-box lw-box--reserve');
+    var big = h('div', 'lw-big');
+    var num = h('span', 'lw-big__n', '0');
+    var bar = $('<div class="lw-bar"><i style="width:0"></i></div>');
+    var cards = h('div', 'lw-cards lw-cards--three');
+    var saved = statCard('0', TXT.reserveSaved);
+    var speed = statCard('—', TXT.reserveSpeed);
+    var eta = statCard('—', TXT.reserveEta);
+    var capNote = null;
+
+    big.append(num).append(h('small', '', '%'));
+    box.append(big);
+    box.append(h('div', 'lw-kicker', TXT.reserveKicker));
+    box.append(h('div', 'lw-title', TXT.reserveTitle));
+    box.append(h('div', 'lw-line', shortText(entry.item.Title, 90) + '. Как только запаса хватит, плеер запустится сам.'));
+    box.append(bar);
+    cards.append(saved).append(speed).append(eta);
+    box.append(cards);
+
+    function stop() {
+        finished = true;
+
+        if (cancelMeasure) cancelMeasure();
+
+        cancelMeasure = null;
+        net.clear();
+    }
+
+    openModal({
+        title: '',
+        html: box,
+        size: 'large',
+        buttons: [
+            { name: TXT.reserveNow, onSelect: function () { stop(); closeModal(); play(item); } },
+            { name: TXT.cancel, onSelect: function () { stop(); closeModal(); dropTorrent(function () {}); } }
+        ],
+        onBack: function () { stop(); closeModal(); }
+    });
+
+    cancelMeasure = SP.accumulate({ url: url, get: net.get, targetBytes: rs.r.bytes, interval: TICK_MS, maxMs: CFG.reserveMaxMs, stallMs: CFG.reserveStallMs }, function (out) {
+        if (finished) return;
+
+        finished = true;
+        cancelMeasure = null;
+        net.clear();
+        closeModal();
+
+        if (out.reason === 'cancel') return;
+
+        if (out.reason === 'ready') noty('Запас накоплен: ' + S.formatSize(out.preloaded) + '. Запускаю');
+        else noty('Запас перестал расти (' + S.formatSize(out.preloaded) + '), запускаю с тем, что есть');
+
+        play(item);
+    }, function (s) {
+        if (finished) return;
+
+        num.text(String(s.pct));
+        bar.find('i').css('width', s.pct + '%');
+        saved.find('b').text(pairSize(s.preloaded, s.target));
+        speed.find('b').text(s.mbps + ' Мбит/с');
+        eta.find('b').text(etaText(s.etaSec));
+
+        if (s.capped && !capNote) {
+            capNote = h('div', 'lw-note', TXT.reserveCapNote);
+            box.append(capNote);
+        }
+    });
 }
 
 // Закрыть окно со списком файлов у Лампы: она сама остановит торрент и вернёт фокус
@@ -1339,6 +1697,10 @@ function start() {
 
         Lampa.Listener.follow('full', addButton);
         Lampa.Listener.follow('torrent_file', onTorrentFile);
+
+        try {
+            if (Lampa.Player && Lampa.Player.listener) Lampa.Player.listener.follow('destroy', function () { setTimeout(refreshNext, 400); });
+        } catch (e2) {}
     } catch (e) {
         log('start: ' + e);
     }
@@ -1350,4 +1712,4 @@ else window.Lampa.Listener.follow('app', function (e) {
 });
 
 LW.ui = { h: h, openModal: openModal, closeModal: closeModal, noty: noty, shortText: shortText, log: log };
-LW.watch = { start: start, openWishes: openWishes, addButton: addButton };
+LW.watch = { start: start, openWishes: openWishes, addButton: addButton, prefetchOn: prefetchOn, cachedResults: cachedResults, playNext: playNext, refreshNext: refreshNext };

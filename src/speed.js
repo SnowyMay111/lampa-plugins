@@ -214,6 +214,139 @@ LW.speed = (function () {
         return function cancel() { finish('cancel'); };
     }
 
+
+    // Запас перед стартом. Если раздача качается медленнее, чем нужно фильму, плеер упрётся в конец накопленного.
+    // Чтобы досмотреть без пауз, начало надо накопить заранее: весь недобор за фильм (нужно - есть) * длительность,
+    // плюс 10% на колебания скорости. Один Мбит/с это 125 000 байт в секунду.
+    // Возвращает { needed, bytes, waitSec, waitMin, feasible }: feasible = ждать не дольше часа.
+    var RESERVE_MARGIN = 1.1;
+    var RESERVE_MAX_MIN = 60;
+
+    function reserve(haveMbps, needMbps, durationMin) {
+        var out = { needed: false, bytes: 0, waitSec: 0, waitMin: 0, feasible: false };
+
+        if (!(haveMbps > 0) || !(needMbps > 0) || !(durationMin > 0) || haveMbps >= needMbps) return out;
+
+        var bytes = Math.round((needMbps - haveMbps) * durationMin * 60 * 125000 * RESERVE_MARGIN);
+        var sec = Math.ceil(bytes / (haveMbps * 125000));
+
+        out.needed = true;
+        out.bytes = bytes;
+        out.waitSec = sec;
+        out.waitMin = Math.max(1, Math.round(sec / 60));
+        out.feasible = sec <= RESERVE_MAX_MIN * 60;
+
+        return out;
+    }
+
+    // Сколько реально накопит сервер: предзагрузка TorrServer ограничена своей настройкой (preload_size).
+    // Если она известна и меньше нужного, копим до неё и говорим об этом честно.
+    function reserveTarget(bytes, preloadSize) {
+        if (preloadSize > 0 && preloadSize < bytes) return { bytes: preloadSize, capped: true };
+
+        return { bytes: bytes, capped: false };
+    }
+
+    // Копим запас: опрашиваем состояние торрента, пока не накопится нужное, не упрёмся в предел сервера,
+    // не застоимся или не выйдет время. opts: { url (адрес предзагрузки), get(url, ok, fail), targetBytes, maxMs, interval, stallMs, now() }
+    // done({ reason: 'ready' | 'stalled' | 'time' | 'cancel', preloaded, target, capped, mbps, peers, seconds }), progress({ preloaded, target, pct, mbps, etaSec, peers, elapsed, capped })
+    function accumulate(opts, done, progress) {
+        var interval = opts.interval || 1000;
+        var maxMs = opts.maxMs || 30 * 60000;
+        var stallMs = opts.stallMs || 25000;
+        var now = opts.now || function () { return new Date().getTime(); };
+        var statUrl = opts.url.replace('&preload', '&stat');
+        var started = now();
+        var grew = started;
+        var best = 0;
+        var target = opts.targetBytes;
+        var capped = false;
+        var speeds = [];
+        var last = {};
+        var stopped = false;
+        var timer = null;
+
+        function avgSpeed() {
+            if (!speeds.length) return 0;
+
+            var sum = 0;
+
+            speeds.forEach(function (x) { sum += x; });
+
+            return sum / speeds.length;
+        }
+
+        function finish(reason) {
+            if (stopped) return;
+
+            stopped = true;
+            clearTimeout(timer);
+
+            done({
+                reason: reason, preloaded: best, target: target, capped: capped,
+                mbps: round1(avgSpeed()), peers: last.peers || 0,
+                seconds: Math.round(Math.max(1, now() - started) / 1000)
+            });
+        }
+
+        function tick() {
+            if (stopped) return;
+
+            opts.get(statUrl, function (res) {
+                if (stopped) return;
+
+                res = res || {};
+
+                var t = now();
+                var bytes = res.preloaded_bytes || 0;
+                var mbps = (res.download_speed || 0) * 8 / 1e6;
+                var cut = reserveTarget(opts.targetBytes, res.preload_size || 0);
+
+                target = cut.bytes;
+                capped = cut.capped;
+
+                if (bytes > best) {
+                    best = bytes;
+                    grew = t;
+                }
+
+                speeds.push(mbps);
+
+                if (speeds.length > 6) speeds.shift();
+
+                last = { peers: res.active_peers || 0 };
+
+                var avg = avgSpeed();
+
+                if (progress) {
+                    progress({
+                        preloaded: best, target: target, capped: capped,
+                        pct: target > 0 ? Math.min(100, Math.floor(best / target * 100)) : 0,
+                        mbps: round1(avg),
+                        etaSec: avg > 0 && best < target ? Math.ceil((target - best) / (avg * 125000)) : 0,
+                        peers: last.peers, elapsed: t - started
+                    });
+                }
+
+                if (target > 0 && best >= target * 0.95) return finish('ready');
+                if (t - grew >= stallMs) return finish('stalled');
+                if (t - started >= maxMs) return finish('time');
+
+                timer = setTimeout(tick, interval);
+            }, function () {
+                if (stopped) return;
+
+                if (now() - started >= maxMs) return finish('time');
+
+                timer = setTimeout(tick, interval);
+            });
+        }
+
+        tick();
+
+        return function cancel() { finish('cancel'); };
+    }
+
     return {
         TYPICAL: TYPICAL,
         DEFAULT_LINE: DEFAULT_LINE,
@@ -225,6 +358,9 @@ LW.speed = (function () {
         verdict: verdict,
         tips: tips,
         lighter: lighter,
-        measure: measure
+        measure: measure,
+        reserve: reserve,
+        reserveTarget: reserveTarget,
+        accumulate: accumulate
     };
 })();

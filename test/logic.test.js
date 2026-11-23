@@ -8,9 +8,9 @@ const assert = require('assert');
 
 const ctx = vm.createContext({ LW: {}, console, setTimeout, clearTimeout, Date, Math, JSON, parseInt, parseFloat, isNaN, RegExp, Object });
 
-['speed.js', 'score.js', 'list.js'].forEach((f) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8'), ctx, { filename: f }));
+['speed.js', 'score.js', 'series.js', 'list.js'].forEach((f) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8'), ctx, { filename: f }));
 
-const { score, speed, list } = ctx.LW;
+const { score, speed, list, series } = ctx.LW;
 const plain = (x) => JSON.parse(JSON.stringify(x));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -414,6 +414,120 @@ const ALL = [A, B, C, D, E, F, G, H, I];
         const e = score.evaluate(Object.assign({}, A, { PublishDate: '2026-03-07T10:00:00Z' }), score.DEFAULT_WISHES, fightClub);
         assert.ok(/^\d{2}\.03\.2026$/.test(list.dateLabel(e)) || /^\d{2}\.\d{2}\.2026$/.test(list.dateLabel(e)));
         assert.strictEqual(list.dateLabel(score.evaluate(A, score.DEFAULT_WISHES, fightClub)), '');
+    });
+
+    // ----------------------------------------------------------- запас перед стартом
+    await test('запас: скорости хватает, запас не нужен; не хватает, считаем объём и ожидание', () => {
+        assert.strictEqual(speed.reserve(12, 10, 100).needed, false);
+        assert.strictEqual(speed.reserve(0, 10, 100).needed, false);
+        assert.strictEqual(speed.reserve(8, 10.4, 0).needed, false, 'без длины фильма не гадаем');
+
+        const r = speed.reserve(8, 10, 100);
+        // недобор 2 Мбит/с * 6000 с * 125000 Б * 1,1 запаса на колебания
+        assert.strictEqual(r.needed, true);
+        assert.strictEqual(r.bytes, Math.round(2 * 6000 * 125000 * 1.1));
+        assert.strictEqual(r.waitSec, Math.ceil(r.bytes / (8 * 125000)));
+        assert.strictEqual(r.waitMin, Math.round(r.waitSec / 60));
+        assert.strictEqual(r.feasible, true);
+    });
+
+    await test('запас: ждать дольше часа бессмысленно, такой запас не предлагаем', () => {
+        const r = speed.reserve(2, 10, 100);
+
+        assert.strictEqual(r.needed, true);
+        assert.strictEqual(r.feasible, false);
+        assert.ok(r.waitMin > 60);
+    });
+
+    await test('запас: сервер копит не больше своей предзагрузки, это ограничение честно возвращается', () => {
+        assert.deepStrictEqual(plain(speed.reserveTarget(4e9, 0)), { bytes: 4e9, capped: false });
+        assert.deepStrictEqual(plain(speed.reserveTarget(4e9, 1e12)), { bytes: 4e9, capped: false });
+        assert.deepStrictEqual(plain(speed.reserveTarget(4e9, 1e9)), { bytes: 1e9, capped: true });
+    });
+
+    const fakeGet = (seq) => {
+        let i = 0;
+        const calls = [];
+
+        return { calls, get: (url, ok) => { calls.push(url); const r = seq[Math.min(i++, seq.length - 1)]; setTimeout(() => ok(r), 1); } };
+    };
+
+    await test('накопление: опрашивает &stat, считает процент и скорость, по готовности говорит «ready»', async () => {
+        const g = fakeGet([
+            { preloaded_bytes: 1e9, preload_size: 1e12, download_speed: 2e6, active_peers: 10 },
+            { preloaded_bytes: 2e9, preload_size: 1e12, download_speed: 2e6, active_peers: 12 },
+            { preloaded_bytes: 4.1e9, preload_size: 1e12, download_speed: 2e6, active_peers: 12 }
+        ]);
+        const seen = [];
+        const out = await new Promise((done) => speed.accumulate({ url: 'http://ts/stream/x?link=A&index=1&preload', get: g.get, targetBytes: 4e9, interval: 2 }, done, (s) => seen.push(plain(s))));
+
+        assert.strictEqual(out.reason, 'ready');
+        assert.ok(g.calls.every((u) => u.indexOf('&stat') > 0 && u.indexOf('&preload') < 0), g.calls.join(' '));
+        assert.strictEqual(seen[0].pct, 25);
+        assert.strictEqual(seen[1].pct, 50);
+        assert.strictEqual(seen[0].mbps, 16);
+        assert.ok(seen[0].etaSec > 0);
+    });
+
+    await test('накопление: предел предзагрузки сервера ниже нужного, копим до предела и говорим об этом', async () => {
+        const g = fakeGet([{ preloaded_bytes: 9.9e8, preload_size: 1e9, download_speed: 1e6, active_peers: 5 }]);
+        const seen = [];
+        const out = await new Promise((done) => speed.accumulate({ url: 'u&preload', get: g.get, targetBytes: 4e9, interval: 2 }, done, (s) => seen.push(plain(s))));
+
+        assert.strictEqual(out.reason, 'ready');
+        assert.strictEqual(out.capped, true);
+        assert.strictEqual(out.target, 1e9);
+        assert.strictEqual(seen[0].capped, true);
+    });
+
+    await test('накопление: перестало расти (застой), вышло время, отмена', async () => {
+        const stuck = fakeGet([{ preloaded_bytes: 1e8, preload_size: 1e12, download_speed: 1e6, active_peers: 3 }]);
+        const a = await new Promise((done) => speed.accumulate({ url: 'u&preload', get: stuck.get, targetBytes: 4e9, interval: 2, stallMs: 30 }, done));
+
+        assert.strictEqual(a.reason, 'stalled');
+        assert.strictEqual(a.preloaded, 1e8);
+
+        let n = 0;
+        const slow = { get: (url, ok) => setTimeout(() => ok({ preloaded_bytes: ++n * 1e6, preload_size: 1e12, download_speed: 1e6, active_peers: 3 }), 1) };
+        const b = await new Promise((done) => speed.accumulate({ url: 'u&preload', get: slow.get, targetBytes: 4e9, interval: 2, maxMs: 40, stallMs: 1e6 }, done));
+
+        assert.strictEqual(b.reason, 'time');
+
+        let cancel;
+        const c = await new Promise((done) => { cancel = speed.accumulate({ url: 'u&preload', get: slow.get, targetBytes: 4e9, interval: 2, maxMs: 1e6, stallMs: 1e6 }, done); setTimeout(() => cancel(), 10); });
+
+        assert.strictEqual(c.reason, 'cancel');
+    });
+
+    await test('накопление: нет ответов от сервера, ждём до конца времени, а не падаем', async () => {
+        const dead = { get: (url, ok, fail) => setTimeout(fail, 1) };
+        const out = await new Promise((done) => speed.accumulate({ url: 'u&preload', get: dead.get, targetBytes: 4e9, interval: 2, maxMs: 30 }, done));
+
+        assert.strictEqual(out.reason, 'time');
+    });
+
+    // ----------------------------------------------------------- сериал: следующая серия
+    await test('сериал: серия не досмотрена, предлагаем её же; досмотрена, следующую; конец сезона, ничего', () => {
+        const rec = { season: 2, episode: 6 };
+
+        assert.deepStrictEqual(plain(series.step(rec, 40, 8)), { season: 2, episode: 6, resume: true });
+        assert.deepStrictEqual(plain(series.step(rec, 90, 8)), { season: 2, episode: 7, resume: false });
+        assert.strictEqual(series.step({ season: 2, episode: 8 }, 100, 8), null);
+        assert.deepStrictEqual(plain(series.step({ season: 2, episode: 8 }, 100, 0)), { season: 2, episode: 9, resume: false }, 'число серий неизвестно, предлагаем следующую');
+        assert.strictEqual(series.step(null, 100, 8), null);
+        assert.strictEqual(series.step({ season: 1, episode: 0 }, 100, 8), null);
+    });
+
+    await test('сериал: подпись на кнопке', () => {
+        assert.strictEqual(series.label({ episode: 7, resume: false }), 'Серия 7 · та же раздача');
+        assert.strictEqual(series.label({ episode: 6, resume: true }), 'Серия 6 · продолжить · та же раздача');
+    });
+
+    await test('сериал: из записи парсера в хранилище попадают только простые поля', () => {
+        const el = { Title: 'Dark S02', Size: 3e10, Seeders: 5, viewed: true, fn() {}, nested: { a: 1 }, list: [1, 2] };
+        const out = plain(series.slim(el));
+
+        assert.deepStrictEqual(out, { Title: 'Dark S02', Size: 3e10, Seeders: 5, viewed: true });
     });
 
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));

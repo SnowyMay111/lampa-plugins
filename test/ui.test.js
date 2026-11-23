@@ -95,6 +95,7 @@ function makeEnv(opts) {
             field: (k) => (k === 'parse_lang' ? 'df' : store[k])
         },
         Noty: { show: (t) => calls.noty.push(t) },
+        Timeline: { watchedEpisode: (movie, season, episode) => (opts.watched ? opts.watched(season, episode) : 0) },
         Lang: { translate: (k) => k },
         Activity: { push: (o) => calls.activity.push(o) },
         Controller: { toggle: (n) => calls.toggles.push(n), back: () => { calls.back++; } },
@@ -172,10 +173,10 @@ function makeEnv(opts) {
     win.Lampa = Lampa;
     win.appready = true;
     win.lampa_settings = opts.settings || { torrents_use: true };
-    win.lampa_watch_config = { measureMs: 150, warmup: 20, interval: 15, settle: 5, verifyDelay: 5, tuneMs: 400 };
+    win.lampa_watch_config = Object.assign({ measureMs: 150, warmup: 20, interval: 15, settle: 5, verifyDelay: 5, tuneMs: 400, prefetchDelay: 600000, fpsMs: 120, missingMs: 80, reserveStallMs: 400 }, opts.config);
 
     // Модули собираются так же, как в build.js
-    const parts = opts.bundle ? [fs.readFileSync(BUNDLE, 'utf8')] : ['speed', 'score', 'list', 'parser', 'tune', 'watch', 'setup'].map((name) =>
+    const parts = opts.bundle ? [fs.readFileSync(BUNDLE, 'utf8')] : ['health', 'speed', 'score', 'series', 'list', 'parser', 'tune', 'watch', 'setup'].map((name) =>
         'var LW = window.__LW = window.__LW || {};\n(function (LW) {\n\'use strict\';\n' + fs.readFileSync(path.join(SRC, name + '.js'), 'utf8') + '\n})(LW);');
 
     parts.forEach((code) => win.eval(code));
@@ -862,7 +863,7 @@ async function test(name, fn) {
         const comp = env.calls.settings.components[0];
 
         assert.strictEqual(comp.component, 'lampa_watch');
-        assert.deepStrictEqual(env.calls.settings.params.map((p) => p.param.name), ['lw_parser_title', 'lw_parser_pick', 'lw_parser_rollback', 'lw_parser_auto', 'lw_tune_title', 'lw_tune_pick', 'lw_tune_rollback']);
+        assert.deepStrictEqual(env.calls.settings.params.map((p) => p.param.name), ['lw_health_open', 'lw_parser_title', 'lw_parser_pick', 'lw_parser_rollback', 'lw_parser_auto', 'lw_prefetch', 'lw_tune_title', 'lw_tune_pick', 'lw_tune_rollback']);
         assert.strictEqual(param(env, 'lw_parser_pick').param.type, 'button');
         assert.strictEqual(param(env, 'lw_parser_auto').param.type, 'trigger');
         assert.strictEqual(param(env, 'lw_parser_auto').param.default, true);
@@ -1088,6 +1089,499 @@ async function test(name, fn) {
 
         await sleep(60);
         assert.strictEqual(env.modals.length, 0);
+    });
+
+
+    // ---------------------------------------------------------------- запас перед стартом
+
+    const HEAVY = [R('Fight Club (1999) UHD BDRemux 2160p HEVC HDR10 Dolby Vision | Dub', 40, 40)];
+    const heavyEnv = (extra) => makeEnv(Object.assign({ parser: (o, ok) => ok({ Results: HEAVY }) }, extra));
+    const heavyStart = async (env) => {
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Нужен запас перед стартом') >= 0, 2000, 'окно результата с запасом');
+    };
+
+    await test('запас: у тяжёлой раздачи в результате «Нужен запас», объём и время, главная кнопка «Накопить запас и смотреть»', async () => {
+        const env = heavyEnv();
+
+        await heavyStart(env);
+
+        const t = env.text();
+        assert.ok(/около \d[\d,]* ГБ \(≈ \d+ мин\)/.test(t), t);
+        const names = env.top().el.find('.modal__button').map((i, b) => env.$(b).text()).get();
+        assert.deepStrictEqual(names.slice(0, 2), ['Накопить запас и смотреть', 'Запустить сразу']);
+    });
+
+    await test('запас: лёгкая раздача обычная кнопка «Запустить», блока про запас нет', async () => {
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: [FIGHT[2]] }) });
+
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Запустить') >= 0);
+
+        assert.ok(env.text().indexOf('Нужен запас') < 0);
+        assert.ok(env.text().indexOf('Накопить запас') < 0);
+    });
+
+    await test('запас: «Запустить сразу» запускает без замера скорости', async () => {
+        const env = heavyEnv();
+
+        await heavyStart(env);
+        env.press('Запустить сразу');
+        await waitFor(() => env.calls.played.length === 1, 2000, 'запуск без замера');
+        assert.strictEqual(env.calls.stat.length, 0, 'замер всё же шёл');
+    });
+
+    await test('запас: «Накопить запас и смотреть» меряет скорость, показывает процент и сам запускает, когда запаса хватит', async () => {
+        const st = { phase: 'measure', fill: 0 };
+        const env = heavyEnv({ stat: () => ({ download_speed: 4e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: st.phase === 'measure' ? 1 : st.fill, preload_size: 1e12 }) });
+
+        await heavyStart(env);
+        env.press('Накопить запас и смотреть');
+        await waitFor(() => env.text().indexOf('Копим запас') >= 0, 3000, 'экран запаса');
+
+        assert.strictEqual(env.calls.played.length, 0);
+        await waitFor(() => env.text().indexOf('Мбит/с') > 0, 1000, 'скорость на экране запаса');
+        assert.ok(env.top().el.find('.lw-big').length === 1 && env.text().indexOf('накоплено') > 0);
+
+        st.phase = 'half';
+        st.fill = 3.6e9;
+        await waitFor(() => parseInt(env.top().el.find('.lw-big__n').text(), 10) >= 40, 2000, 'процент вырос');
+
+        const pct = parseInt(env.top().el.find('.lw-big__n').text(), 10);
+        assert.ok(pct > 40 && pct < 60, 'процент ' + pct);
+        assert.ok(/из \d[\d,]* ГБ/.test(env.text()), env.text());
+        assert.strictEqual(env.calls.played.length, 0, 'запустилось раньше времени');
+
+        st.fill = 9e9;
+        await waitFor(() => env.calls.played.length === 1, 2000, 'автозапуск');
+        assert.ok(env.calls.noty.some((n) => n.indexOf('Запас накоплен') === 0), env.calls.noty.join('|'));
+        assert.strictEqual(env.modals.length, 0, 'экран запаса остался');
+    });
+
+    await test('запас: «Начать сейчас» запускает сразу и останавливает опрос', async () => {
+        const env = heavyEnv({ stat: () => ({ download_speed: 4e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: 1, preload_size: 1e12 }) });
+
+        await heavyStart(env);
+        env.press('Накопить запас и смотреть');
+        await waitFor(() => env.text().indexOf('Копим запас') >= 0, 3000);
+        env.press('Начать сейчас');
+        assert.strictEqual(env.calls.played.length, 1);
+
+        const n = env.calls.stat.length;
+        await sleep(80);
+        assert.strictEqual(env.calls.stat.length, n, 'опрос не остановился');
+    });
+
+    await test('запас: «Отмена» не запускает фильм и закрывает окно файлов у Лампы', async () => {
+        const env = heavyEnv({ stat: () => ({ download_speed: 4e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: 1, preload_size: 1e12 }) });
+
+        await heavyStart(env);
+        env.press('Накопить запас и смотреть');
+        await waitFor(() => env.text().indexOf('Копим запас') >= 0, 3000);
+
+        const back = env.calls.back;
+        env.press('Отмена');
+        await sleep(300);
+        assert.strictEqual(env.calls.played.length, 0);
+        assert.strictEqual(env.calls.back, back + 1);
+        assert.strictEqual(env.modals.length, 0);
+    });
+
+    await test('запас: если запас перестал расти, фильм всё равно запускается и об этом сказано', async () => {
+        const st = { stall: false };
+        const env = heavyEnv({ stat: () => ({ download_speed: 4e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: st.stall ? 5e8 : 1, preload_size: 1e12 }) });
+
+        await heavyStart(env);
+        env.press('Накопить запас и смотреть');
+        await waitFor(() => env.text().indexOf('Копим запас') >= 0, 3000, 'экран запаса');
+        st.stall = true;
+        await waitFor(() => env.calls.played.length === 1, 4000, 'запуск после застоя');
+        assert.ok(env.calls.noty.some((n) => n.indexOf('Запас перестал расти') === 0), env.calls.noty.join('|'));
+    });
+
+    await test('запас: сервер копит меньше нужного: честный совет вместо экрана накопления', async () => {
+        const env = heavyEnv({ stat: () => ({ download_speed: 4e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: 1, preload_size: 1e9 }) });
+
+        await heavyStart(env);
+        env.press('Накопить запас и смотреть');
+        await waitFor(() => env.text().indexOf('копит запас только до') >= 0, 3000, 'совет про предел сервера');
+
+        assert.ok(env.text().indexOf('Копим запас') < 0);
+        const names = env.top().el.find('.modal__button').map((i, b) => env.$(b).text()).get();
+        assert.ok(names.every((n) => n.indexOf('Накопить запас') < 0), names.join('|'));
+    });
+
+    await test('запас: после замера «Накопить запас» есть и в окне вердикта, если запускали обычной кнопкой', async () => {
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: [R('Fight Club (1999) BDRip 1080p AVC Дубляж', 9, 150)] }), stat: () => ({ download_speed: 0.9e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: 1, preload_size: 1e12 }) });
+
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.row('Качество').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Запустить') >= 0);
+        env.press('Запустить');
+        await waitFor(() => env.text().indexOf('Накопить запас и смотреть') >= 0, 3000, 'вердикт с запасом');
+        assert.ok(env.text().indexOf('Нужен запас перед стартом') >= 0);
+        assert.ok(env.text().indexOf('Если запустить и подождать') < 0, 'совет «подождать» должен уступить блоку про запас');
+    });
+
+    // ---------------------------------------------------------------- сериал: следующая серия
+
+    const DARK = [R('Тьма / Dark (2019) S02 WEB-DL 1080p Rus Дубляж', 30, 60)];
+    const darkFiles = (upTo) => () => Array.from({ length: upTo }, (x, i) => ({ id: i + 1, path: 'Dark.S02/Dark.S02E' + (i + 1) + '.mkv', length: 3 * GB, season: 2, episode: i + 1 }));
+    const watchEpisode = async (env, n) => {
+        env.card(SERIES).find('.lw-watch-btn').trigger('hover:enter');
+        env.row('Сезон').trigger('hover:enter'); // сезон 2
+        env.row('Серия').trigger('hover:enter');
+        env.calls.selects[env.calls.selects.length - 1].onSelect(env.calls.selects[env.calls.selects.length - 1].items[n]);
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Запустить') >= 0, 2000, 'результат сериала');
+        env.press('Запустить');
+        await waitFor(() => env.calls.played.length === 1, 3000, 'серия ' + n);
+    };
+
+    await test('сериал: без запомненной раздачи кнопки «следующая серия» нет', async () => {
+        const env = makeEnv();
+        const root = env.card(SERIES);
+
+        assert.strictEqual(root.find('.lw-next-btn').length, 0);
+        assert.strictEqual(root.find('.lw-watch-btn span').text(), 'Лучшая раздача');
+    });
+
+    await test('сериал: серия не досмотрена: «Серия 6 · продолжить · та же раздача», рядом «Другая раздача»', async () => {
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: DARK }), files: darkFiles(10) });
+
+        await watchEpisode(env, 6);
+
+        const root = env.card(SERIES);
+        assert.strictEqual(root.find('.lw-next-btn span').text(), 'Серия 6 · продолжить · та же раздача');
+        assert.strictEqual(root.find('.lw-watch-btn span').text(), 'Другая раздача');
+        assert.ok(root.find('.button--play').next().hasClass('lw-next-btn') && root.find('.lw-next-btn').next().hasClass('lw-watch-btn'), 'порядок кнопок');
+    });
+
+    await test('сериал: серия 6 досмотрена: главная кнопка предлагает серию 7 из той же раздачи, без поиска и замера', async () => {
+        const state = { upTo: 0 };
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: DARK }), files: darkFiles(10), watched: (s, e) => (e <= state.upTo ? 95 : 0) });
+
+        await watchEpisode(env, 6);
+        state.upTo = 6;
+
+        const root = env.card(SERIES);
+        assert.strictEqual(root.find('.lw-next-btn span').text(), 'Серия 7 · та же раздача');
+
+        const parserCalls = env.calls.parser.length;
+        const statCalls = env.calls.stat.length;
+        const title = env.calls.torrent[0].Title;
+
+        root.find('.lw-next-btn').trigger('hover:enter');
+        await waitFor(() => env.calls.played.length === 2, 3000, 'серия 7');
+
+        assert.strictEqual(env.calls.parser.length, parserCalls, 'искали заново');
+        assert.strictEqual(env.calls.stat.length, statCalls, 'мерили скорость заново');
+        assert.strictEqual(env.calls.torrent[1].Title, title, 'раздача другая');
+        assert.strictEqual(env.calls.played[1].episode, 7);
+        assert.ok(env.calls.noty.some((n) => n.indexOf('Серия 7') === 0), env.calls.noty.join('|'));
+
+        const next = env.card(SERIES).find('.lw-next-btn span').text();
+        assert.strictEqual(next, 'Серия 7 · продолжить · та же раздача', 'запись должна сместиться на серию 7: ' + next);
+    });
+
+    await test('сериал: конец сезона: следующей серии нет, кнопка снова «Лучшая раздача»', async () => {
+        const state = { pct: 0 };
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: DARK }), files: darkFiles(10), watched: () => state.pct });
+
+        await watchEpisode(env, 8); // во втором сезоне 8 серий
+        state.pct = 99;
+
+        const root = env.card(SERIES);
+        assert.strictEqual(root.find('.lw-next-btn').length, 0);
+        assert.strictEqual(root.find('.lw-watch-btn span').text(), 'Лучшая раздача');
+    });
+
+    await test('сериал: в раздаче нет нужной серии: сказано об этом, раздача забыта', async () => {
+        const state = { pct: 0 };
+        const env = makeEnv({ parser: (o, ok) => ok({ Results: DARK }), files: darkFiles(6), watched: () => state.pct });
+
+        await watchEpisode(env, 6);
+        state.pct = 95;
+        env.card(SERIES).find('.lw-next-btn').trigger('hover:enter');
+        await waitFor(() => env.calls.noty.some((n) => n.indexOf('В этой раздаче нет серии 7') === 0), 2000, 'сообщение об отсутствии серии');
+
+        assert.strictEqual(env.card(SERIES).find('.lw-next-btn').length, 0);
+    });
+
+    await test('сериал: фильмы раздачу не запоминают', async () => {
+        const env = makeEnv({ stat: () => ({ download_speed: 8e6, active_peers: 20, connected_seeders: 9, preloaded_bytes: 1, preload_size: 1e12 }) });
+
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.row('Качество').trigger('hover:enter'); // 1080p
+        env.press('Найти и смотреть');
+        await waitFor(() => env.text().indexOf('Запустить') >= 0);
+        env.press('Запустить');
+        await waitFor(() => env.calls.played.length === 1, 3000);
+        assert.ok(!env.store.lw_series || env.store.lw_series === '{}', env.store.lw_series);
+    });
+
+    // ---------------------------------------------------------------- быстрый поиск заранее
+
+    const quick = { config: { prefetchDelay: 10 } };
+
+    await test('поиск заранее: карточка открыта, парсер спрошен сам, а «Найти и смотреть» открывает результат без экрана поиска', async () => {
+        const env = makeEnv(quick);
+        const root = env.card(MOVIE);
+
+        await waitFor(() => env.calls.parser.length === 1, 1000, 'поиск заранее');
+        await sleep(20);
+
+        root.find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+
+        assert.ok(env.text().indexOf('Ищу раздачи') < 0, 'экран поиска показан');
+        assert.ok(env.text().indexOf('Раздачи найдены заранее') >= 0, env.text());
+        assert.strictEqual(env.calls.parser.length, 1, 'парсер спросили второй раз');
+    });
+
+    await test('поиск заранее: пожелания можно менять, найденное пересчитывается без нового запроса', async () => {
+        const env = makeEnv(quick);
+        const root = env.card(MOVIE);
+
+        await waitFor(() => env.calls.parser.length === 1, 1000);
+        await sleep(20);
+        root.find('.lw-watch-btn').trigger('hover:enter');
+        env.row('Качество').trigger('hover:enter'); // 1080p
+        env.press('Найти и смотреть');
+
+        assert.ok(env.text().indexOf('BDRip 1080p') >= 0, 'выбор не пересчитался под 1080p');
+        assert.strictEqual(env.calls.parser.length, 1);
+    });
+
+    await test('поиск заранее: нажали «Найти» пока поиск ещё идёт: присоединяемся к нему, парсер спрошен один раз', async () => {
+        const env = makeEnv({ config: { prefetchDelay: 5 }, parser: (o, ok) => setTimeout(() => ok({ Results: FIGHT }), 60) });
+        const root = env.card(MOVIE);
+
+        await waitFor(() => env.calls.parser.length === 1, 1000);
+        root.find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        assert.ok(env.text().indexOf('Ищу раздачи') >= 0, 'экран поиска должен быть, пока ответа нет');
+
+        await waitFor(() => env.text().indexOf('Запустить') >= 0, 2000, 'результат');
+        assert.strictEqual(env.calls.parser.length, 1, 'парсер гоняли дважды');
+    });
+
+    await test('поиск заранее: выключено в настройках, парсер без просьбы не трогаем', async () => {
+        const env = makeEnv({ config: { prefetchDelay: 5 }, store: { lw_prefetch: false } });
+
+        env.card(MOVIE);
+        await sleep(60);
+        assert.strictEqual(env.calls.parser.length, 0);
+        assert.strictEqual(env.win.__LW.watch.prefetchOn(), false);
+    });
+
+    await test('поиск заранее: «Уточнить поиск» своим запросом идёт заново, а не из найденного', async () => {
+        const env = makeEnv(quick);
+        const root = env.card(MOVIE);
+
+        await waitFor(() => env.calls.parser.length === 1, 1000);
+        await sleep(20);
+        root.find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        env.press('Все раздачи');
+        env.top().el.find('.lw-tool').filter((i, t) => env.$(t).text().indexOf('Уточнить поиск') >= 0).trigger('hover:enter');
+        env.calls.inputCb('Fight Club 1999');
+        await waitFor(() => env.calls.parser.length === 2, 1000, 'новый запрос');
+        assert.strictEqual(env.calls.parser[1].search, 'Fight Club 1999');
+    });
+
+    await test('поиск заранее: пустой ответ не запоминается, нажатие кнопки ищет заново', async () => {
+        const env = makeEnv({ config: { prefetchDelay: 5 }, parser: (o, ok) => ok({ Results: [] }) });
+        const root = env.card(MOVIE);
+
+        await waitFor(() => env.calls.parser.length === 1, 1000);
+        await sleep(20);
+        root.find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.calls.parser.length === 2, 1000, 'второй запрос');
+    });
+
+    await test('поиск заранее: найденное запоминается по фильму, сезону и запросу', async () => {
+        const env = makeEnv(quick);
+
+        env.card(MOVIE);
+        await waitFor(() => env.calls.parser.length === 1, 1000);
+        await sleep(20);
+
+        const W = env.win.__LW.watch;
+        assert.ok(W.cachedResults(MOVIE, 0, ''), 'найденное должно запомниться');
+        assert.strictEqual(W.cachedResults(MOVIE, 0, 'Fight Club 1999'), null, 'другой запрос не должен брать чужое');
+        assert.strictEqual(W.cachedResults({ id: 1 }, 0, ''), null, 'другой фильм не должен брать чужое');
+    });
+
+    // ---------------------------------------------------------------- диагностика
+
+    const MANIFEST = (v) => ({ plugins: [{ id: 'lampa_watch', version: v }] });
+    const diagNet = (version) => (url) => (/manifest\.json/.test(url) ? MANIFEST(version) : goodNet(url));
+    const openDiag = async (env) => {
+        env.win.__LW.version = '1.3.4';
+        param(env, 'lw_health_open').onChange();
+        await waitFor(() => env.top().el.find('.lw-dgc[data-level=run]').length === 0, 4000, 'все проверки завершены');
+    };
+    const card = (env, key) => env.top().el.find('.lw-dgc[data-key=' + key + ']');
+
+    await test('диагностика: в настройках строка первой, у неё описание с версией до проверки', async () => {
+        const env = makeEnv({ store: MINE });
+        env.win.__LW.version = '1.3.4';
+
+        assert.strictEqual(env.calls.settings.params[0].param.name, 'lw_health_open');
+
+        const item = env.$('<div><div class="settings-param__descr"></div></div>');
+        param(env, 'lw_health_open').onRender(item);
+        assert.strictEqual(item.find('.settings-param__descr').text(), '1.3.4 · нажмите, чтобы проверить');
+    });
+
+    await test('диагностика: шесть плиток, у каждой значок, слово и значение; всё хорошо', async () => {
+        const env = makeEnv({ store: Object.assign({ torrserver_url: 'http://ts:8090', parser_torrent_type: 'jackett', jackett_url: 'https://jac.red', parser_use_link: 'one' }), net: diagNet('1.3.4'), server: { CacheSize: 4e9, PreloadCache: 1 } });
+
+        await openDiag(env);
+
+        ['Версия плагина', 'Откуда загружен', 'Парсер', 'TorrServer', 'Плавность интерфейса', 'Последние ошибки'].forEach((n) => assert.ok(env.text().indexOf(n) >= 0, n));
+        assert.strictEqual(env.top().el.find('.lw-dgc').length, 6);
+        assert.ok(env.top().el.find('.lw-dgc').toArray().every((c) => env.$(c).find('.lw-hdot').text().length === 1 && env.$(c).find('.lw-dgc__w').text().length > 0), 'у плитки нет значка или слова');
+        assert.strictEqual(card(env, 'version').attr('data-level'), 'ok');
+        assert.ok(card(env, 'version').text().indexOf('Обновление не нужно') >= 0, card(env, 'version').text());
+        assert.strictEqual(card(env, 'parser').attr('data-level'), 'ok');
+        assert.ok(card(env, 'parser').text().indexOf('jac.red') >= 0 && /за \d[\d,]* с · \d+ раздач/.test(card(env, 'parser').text()), card(env, 'parser').text());
+        assert.strictEqual(card(env, 'server').attr('data-level'), 'ok');
+        assert.ok(card(env, 'server').text().indexOf('Предзагрузка 1%') >= 0 && card(env, 'server').text().indexOf('ts:8090') >= 0, card(env, 'server').text());
+        assert.strictEqual(card(env, 'errors').attr('data-level'), 'ok');
+        assert.ok(card(env, 'errors').text().indexOf('Ошибок нет') >= 0);
+        assert.ok(/\d+ кадров\/с/.test(card(env, 'perf').text()), card(env, 'perf').text());
+    });
+
+    await test('диагностика: вышла новая версия: «Внимание», сказано, что делать', async () => {
+        const env = makeEnv({ store: MINE, net: diagNet('1.9.0') });
+
+        await openDiag(env);
+        assert.strictEqual(card(env, 'version').attr('data-level'), 'warn');
+        assert.ok(card(env, 'version').text().indexOf('Вышла версия 1.9.0') >= 0 && card(env, 'version').text().indexOf('Перезапустите Лампу') >= 0);
+    });
+
+    await test('диагностика: сайт обновлений недоступен: «Внимание», а не ошибка', async () => {
+        const env = makeEnv({ store: MINE, net: () => null });
+
+        await openDiag(env);
+        assert.strictEqual(card(env, 'version').attr('data-level'), 'warn');
+        assert.ok(card(env, 'version').text().indexOf('нет связи с сайтом обновлений') >= 0);
+    });
+
+    await test('диагностика: парсер молчит, TorrServer не задан: «Проблема» и «Внимание» с советами', async () => {
+        const env = makeEnv({ store: MINE, net: () => null });
+
+        await openDiag(env);
+        assert.strictEqual(card(env, 'parser').attr('data-level'), 'bad');
+        assert.ok(card(env, 'parser').text().indexOf('Подобрать парсер') >= 0);
+        assert.strictEqual(card(env, 'server').attr('data-level'), 'warn');
+        assert.ok(card(env, 'server').text().indexOf('Адрес не задан') >= 0);
+    });
+
+    await test('диагностика: TorrServer не отвечает: «Проблема» с причиной', async () => {
+        const env = makeEnv({ store: Object.assign({ torrserver_url: 'http://ts:8090' }, MINE), net: () => null, server: { CacheSize: 1 }, serverDown: true });
+
+        await openDiag(env);
+        assert.strictEqual(card(env, 'server').attr('data-level'), 'bad');
+        assert.ok(card(env, 'server').text().indexOf('TorrServer не ответил') >= 0, card(env, 'server').text());
+    });
+
+    await test('диагностика: сбой поиска попадает в журнал, а автоподбор парсера дописывает «что плагин сделал сам»', async () => {
+        let env;
+
+        env = makeEnv({ store: MINE, net: goodNet, parser: (o, ok, fail) => (env.store.jackett_url === 'https://jac.red' ? ok({ Results: FIGHT }) : fail('Парсер не отвечает (http://mine:9117)')) });
+        env.card(MOVIE).find('.lw-watch-btn').trigger('hover:enter');
+        env.press('Найти и смотреть');
+        await waitFor(() => env.win.__LW.health.errors().length >= 1, 3000, 'запись в журнале');
+
+        const list = env.win.__LW.health.errors();
+        assert.ok(list.length >= 1 && list[0].kind === 'parser' && list[0].text.indexOf('Парсер не ответил') >= 0, JSON.stringify(list));
+    });
+
+    await test('диагностика: журнал: плитка показывает последнюю запись, повтор подряд не плодит строки', async () => {
+        const env = makeEnv({ store: MINE, net: diagNet('1.3.4') });
+        const H = env.win.__LW.health;
+
+        H.note('parser', 'Парсер не ответил', 'Плагин сам переключился на jac.red');
+        H.note('parser', 'Парсер не ответил');
+        assert.strictEqual(H.errors().length, 1);
+
+        await openDiag(env);
+        assert.strictEqual(card(env, 'errors').attr('data-level'), 'warn');
+        assert.ok(card(env, 'errors').text().indexOf('Парсер не ответил') >= 0 && card(env, 'errors').text().indexOf('Плагин сам переключился на jac.red') >= 0, card(env, 'errors').text());
+    });
+
+    await test('диагностика: журнал хранит не больше 12 записей, новые сверху', async () => {
+        const env = makeEnv();
+        const H = env.win.__LW.health;
+
+        for (let i = 0; i < 20; i++) H.note('watch', 'ошибка ' + i);
+        assert.strictEqual(H.errors().length, 12);
+        assert.strictEqual(H.errors()[0].text, 'ошибка 19');
+    });
+
+    await test('диагностика: «Откуда загружен»: короткая ссылка, полная, прямая и старая jsDelivr', async () => {
+        const env = makeEnv();
+        const C = env.win.__LW.health.classify;
+
+        assert.strictEqual(C(['https://snowymay111.github.io/l.js'], '', true).value, 'Короткая ссылка');
+        assert.strictEqual(C(['https://snowymay111.github.io/lampa-plugins/loader.js'], '', true).value, 'Полная ссылка');
+        assert.strictEqual(C([], 'https://x.y/plugins/lampa_watch.js?v=1', false).level, 'warn');
+
+        const old = C(['https://snowymay111.github.io/l.js', 'https://cdn.jsdelivr.net/gh/SnowyMay111/lampa-torrserver-failover@v1.0.0/torrserver_failover.js'], '', true);
+        assert.strictEqual(old.level, 'warn');
+        assert.strictEqual(old.old, 1);
+        assert.ok(old.sub.indexOf('старая ссылка') >= 0);
+    });
+
+    await test('диагностика: версии сравниваются по числам: 1.3.10 новее 1.3.9', async () => {
+        const env = makeEnv();
+        const V = env.win.__LW.health.cmpVer;
+
+        assert.strictEqual(V('1.3.10', '1.3.9'), 1);
+        assert.strictEqual(V('1.3.3', '1.3.3'), 0);
+        assert.strictEqual(V('1.2.9', '1.3.0'), -1);
+        assert.strictEqual(V('2', '1.9.9'), 1);
+    });
+
+    await test('диагностика: плавность: 60 кадров/с хорошо, 20 плохо, мало кадров не выдумываем', async () => {
+        const env = makeEnv();
+        const F = env.win.__LW.health.summarizeFrames;
+        const at = (step, n) => Array.from({ length: n }, (x, i) => i * step);
+
+        assert.strictEqual(F(at(16.7, 60), 0).level, 'ok');
+        assert.strictEqual(F(at(50, 30), 0).level, 'bad');
+        assert.strictEqual(F(at(25, 40), 2).level, 'warn');
+        assert.strictEqual(F([0, 16], 0).level, 'warn');
+        assert.ok(F(at(16.7, 60), 3).sub.indexOf('долгих задач 3') >= 0);
+    });
+
+    await test('диагностика: итог проверки запоминается и показывается в строке настроек', async () => {
+        const env = makeEnv({ store: MINE, net: diagNet('1.3.4') });
+
+        await openDiag(env);
+
+        const item = env.$('<div><div class="settings-param__descr"></div></div>');
+        param(env, 'lw_health_open').onRender(item);
+        assert.ok(/^1\.3\.4 · (всё в порядке|есть замечания|есть проблемы)$/.test(item.find('.settings-param__descr').text()), item.text());
+    });
+
+    await test('диагностика: «Проверить заново» и «Закрыть» работают, возврат фокуса в настройки', async () => {
+        const env = makeEnv({ store: MINE, net: diagNet('1.3.4') });
+
+        await openDiag(env);
+        env.press('Проверить заново');
+        assert.strictEqual(env.top().el.find('.lw-dgc[data-level=run]').length > 0, true);
+        await waitFor(() => env.top().el.find('.lw-dgc[data-level=run]').length === 0, 4000, 'повторная проверка');
+        env.press('Закрыть');
+        assert.strictEqual(env.modals.length, 0);
+        assert.strictEqual(env.calls.toggles[env.calls.toggles.length - 1], 'settings_component');
     });
 
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));
