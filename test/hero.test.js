@@ -283,6 +283,19 @@ async function test(name, fn) {
         assert.strictEqual(btns[1].textContent, '+ В закладки');
     });
 
+    await test('кнопки появляются только когда в герое есть карточка (класс is-ready)', async () => {
+        const e = makeEnv();
+
+        e.H.on();
+        e.H.sync();
+        assert.ok(e.doc.querySelector('.lw-hero'), 'каркас героя есть');
+        assert.ok(!e.doc.querySelector('.lw-hero').classList.contains('is-ready'), 'карточки ещё нет: кнопки скрыты');
+
+        e.U.cardImgBackground(movie);
+        await sleep(30);
+        assert.ok(e.doc.querySelector('.lw-hero').classList.contains('is-ready'));
+    });
+
     await test('«Подробнее»: открывает карточку той же записью, что и Лампа (фильм и сериал)', async () => {
         const e = await ready();
 

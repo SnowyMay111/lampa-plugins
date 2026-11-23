@@ -193,7 +193,7 @@ async function test(name, fn) {
 
         const names = e.params.map((p) => p.param.name);
 
-        assert.deepStrictEqual(names, ['lw_theme_title', 'lw_theme', 'lw_theme_accent', 'lw_theme_idle']);
+        assert.deepStrictEqual(names, ['lw_theme_title', 'lw_theme', 'lw_theme_accent', 'lw_theme_idle', 'lw_theme_shift']);
         assert.ok(e.params.every((p) => p.component === 'lampa_watch'));
 
         const on = e.params[1].param;
@@ -203,6 +203,8 @@ async function test(name, fn) {
         assert.deepStrictEqual(Object.keys(e.params[2].param.values), ['blue', 'lime']);
         assert.deepStrictEqual(Object.keys(e.params[3].param.values), ['60s', '30s', 'off']);
         assert.strictEqual(e.params[3].param.default, '60s');
+        assert.strictEqual(e.params[4].param.type, 'trigger');
+        assert.strictEqual(e.params[4].param.default, true, 'сдвиг картинки по умолчанию включён');
     });
 
     await test('переключатель в настройках сразу включает оформление', async () => {
@@ -337,6 +339,38 @@ async function test(name, fn) {
         assert.deepStrictEqual(calls, ['on', 'off']);
     });
 
+    await test('сдвиг картинки: включается вместе с оформлением, выключается переключателем и при снятии оформления', () => {
+        const e = makeEnv();
+        const calls = [];
+
+        e.LW.shift = { on: () => calls.push('on'), off: () => calls.push('off') };
+        e.data.lw_theme = true;
+        e.T.start();
+        assert.deepStrictEqual(calls, ['on'], 'по умолчанию включён');
+
+        e.data.lw_theme_shift = false;
+        e.T.apply();
+        assert.deepStrictEqual(calls, ['on', 'off'], 'переключатель выключил');
+
+        e.data.lw_theme_shift = 'false';
+        e.T.apply();
+        assert.strictEqual(calls[calls.length - 1], 'off', 'значение строкой тоже считается выключенным');
+
+        e.data.lw_theme_shift = true;
+        e.T.apply();
+        assert.strictEqual(calls[calls.length - 1], 'on');
+
+        e.T.remove();
+        assert.strictEqual(calls[calls.length - 1], 'off', 'без оформления сдвига нет');
+    });
+
+    await test('сдвиг картинки: один transform на #app через переменные, без переходов и размытия', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+        assert.ok(/body\.lw-theme\.lw-shift #app\{transform:translate\(var\(--lw-sx,0px\),var\(--lw-sy,0px\)\)\}/.test(css), 'сдвиг только с оформлением и классом lw-shift');
+        assert.ok(!/lw-shift[^{]*\{[^}]*(transition|animation|backdrop-filter|blur\()/.test(css), 'у сдвига нет переходов и размытия');
+    });
+
     await test('герой и карточка фильма: стили действуют только с оформлением, ряды окном снизу, афиша убрана', () => {
         const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
@@ -356,6 +390,7 @@ async function test(name, fn) {
         assert.ok(/body\.lw-theme\.lw-home \.lw-hero__btns\{display:flex[^}]*pointer-events:auto/.test(css), 'мышь на кнопки героя работает');
         assert.ok(/\.lw-hero__btn\.focus[^{]*\{background:var\(--paper\);color:var\(--onpaper\);transform:scale\(1\.06\)/.test(css), 'выбранная кнопка светлая и чуть больше');
         assert.ok(!/\.lw-hero__btn[^{]*\{[^}]*(transition|backdrop-filter|blur\()/.test(css), 'у кнопок нет переходов и размытия');
+        assert.ok(/\.lw-hero:not\(\.is-ready\) \.lw-hero__btns\{display:none\}/.test(css), 'пока в герое нет карточки, кнопки скрыты');
     });
 
     await test('страница фильма: ряды под первым экраном на подложке, шапка с тенью сверху, всё без размытия', () => {

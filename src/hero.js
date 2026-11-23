@@ -187,6 +187,7 @@ LW.hero = (function () {
         var p = state.parts;
 
         state.card = d;
+        state.el.classList.add('is-ready'); // кнопки показываем, только когда в герое есть карточка, на которую они действуют
         p.kicker.textContent = kicker(d);
         p.title.textContent = d.title || d.name || '';
         p.desc.textContent = d.overview || '';

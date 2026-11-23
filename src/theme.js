@@ -8,12 +8,13 @@
  * Страховка: если Лампа с оформлением не дожила до 8 секунд три раза подряд,
  * оформление выключается само, и Лампа работает как раньше.
  *
- * Защита OLED: через N секунд без нажатий плитки приглушаются, через 10 с прячется верхняя строка.
+ * Защита OLED: через N секунд без нажатий плитки приглушаются, через 10 с прячется верхняя строка,
+ * а раз в три минуты картинка сдвигается на несколько пикселей (src/shift.js).
  */
 LW.theme = (function () {
     var CSS = '__THEME_CSS__';
 
-    var K = { on: 'lw_theme', accent: 'lw_theme_accent', idle: 'lw_theme_idle', fails: 'lw_theme_fails' };
+    var K = { on: 'lw_theme', accent: 'lw_theme_accent', idle: 'lw_theme_idle', shift: 'lw_theme_shift', fails: 'lw_theme_fails' };
     var STYLE_ID = 'lw-theme-css';
     var MAX_FAILS = 3;     // столько запусков подряд, не дожив до OK_AFTER, выключают оформление
     var OK_AFTER = 8;      // секунд: после этого запуск считается удачным
@@ -31,6 +32,8 @@ LW.theme = (function () {
         idle30: 'Через 30 секунд',
         idleOff: 'Выключена',
         idleDescr: 'Когда долго нет нажатий, плитки приглушаются, а верхняя строка прячется.',
+        shift: 'Сдвиг картинки',
+        shiftDescr: 'Раз в три минуты вся картинка сдвигается на несколько пикселей, чтобы шапка и меню не выжигали экран. Глазу не заметно. Во время фильма не двигается.',
         autoOff: 'Новое оформление выключено: Лампа три раза подряд не запустилась с ним. Включить снова можно в настройках Lampa Watch.'
     };
 
@@ -148,6 +151,7 @@ LW.theme = (function () {
         bind();
         schedule();
         hero(true);
+        shift(shiftWanted());
     }
 
     function remove() {
@@ -155,6 +159,20 @@ LW.theme = (function () {
         clearTimers();
         document.body.classList.remove('lw-theme', 'lw-lime', 'lw-idle', 'lw-idle10');
         hero(false);
+        shift(false);
+    }
+
+    // Сдвиг картинки: включён по умолчанию, выключается переключателем в настройках
+    function shiftWanted() {
+        var v = read(K.shift, true);
+
+        return v !== false && v !== 'false';
+    }
+
+    function shift(on) {
+        try {
+            if (LW.shift) LW.shift[on ? 'on' : 'off']();
+        } catch (e) { /* без сдвига оформление работает */ }
     }
 
     // Герой главной живёт только вместе с оформлением
@@ -232,6 +250,13 @@ LW.theme = (function () {
             field: { name: TXT.idle, description: TXT.idleDescr },
             onChange: function () { setTimeout(schedule, 30); }
         });
+
+        settingsApi.addParam({
+            component: c,
+            param: { name: K.shift, type: 'trigger', default: true },
+            field: { name: TXT.shift, description: TXT.shiftDescr },
+            onChange: function () { setTimeout(refresh, 30); }
+        });
     }
 
     function boot() {
@@ -254,6 +279,7 @@ LW.theme = (function () {
     api.addSettings = addSettings;
     api.isOn = isOn;
     api.idleSeconds = idleSeconds;
+    api.shiftWanted = shiftWanted;
     api.keys = K;
     api.MAX_FAILS = MAX_FAILS;
     api.TXT = TXT;

@@ -299,6 +299,7 @@ body.lw-theme.lw-home .lw-hero__desc{display:-webkit-box;-webkit-line-clamp:2;-w
 /* кнопки героя: обычные .selector Лампы; выбранная становится светлой таблеткой, как все кнопки темы; без перехода фона, только масштаб */
 body.lw-theme .lw-hero__btns{display:none}
 body.lw-theme.lw-home .lw-hero__btns{display:flex;margin-top:1.4vw;pointer-events:auto}
+body.lw-theme.lw-home .lw-hero:not(.is-ready) .lw-hero__btns{display:none}
 body.lw-theme.lw-home .lw-hero__btn{margin-right:.9vw;padding:.65vw 1.8vw;border-radius:2em;background:rgba(255,255,255,.16);font-size:1.15vw;color:var(--ink);white-space:nowrap}
 body.lw-theme.lw-home .lw-hero__btn--main{background:rgba(255,255,255,.28)}
 body.lw-theme.lw-home .lw-hero__btn.focus,body.lw-theme.lw-home .lw-hero__btn.hover{background:var(--paper);color:var(--onpaper);transform:scale(1.06);box-shadow:none}
@@ -319,6 +320,7 @@ body.lw-theme .full-start-new ~ .items-line{background:rgba(14,18,24,.92)}
 body.lw-theme .head{background:linear-gradient(180deg,rgba(14,18,24,.78),rgba(14,18,24,0))}
 
 /* ---------- защита OLED ---------- */
+body.lw-theme.lw-shift #app{transform:translate(var(--lw-sx,0px),var(--lw-sy,0px))}
 body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}
 body.lw-theme.lw-idle .card:not(.focus),body.lw-theme.lw-idle .menu__item:not(.focus),body.lw-theme.lw-idle .items-line__title{opacity:.55}
 body.lw-theme.lw-idle10 .head{opacity:0}
