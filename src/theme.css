@@ -7,7 +7,7 @@
  * .full-start-new/.full-start__button, .settings__content/.settings-folder/.settings-param,
  * .selectbox, .modal, .torrent-item, .player-panel, .search__*.
  */
-body.lw-theme{--edge:#8db8ff;--mid:#1d4fe0;--deep:#0a2478;--word:#6aa2ff;--glow:rgba(70,130,255,.55);--soft:rgba(40,95,235,.20);--faint:rgba(40,95,235,.08);--ink:#f2f4f8;--dim:rgba(242,244,248,.62);--line:rgba(255,255,255,.1);background:#000!important;color:var(--ink)}
+body.lw-theme{--edge:#8db8ff;--mid:#1d4fe0;--deep:#0a2478;--word:#6aa2ff;--glow:rgba(70,130,255,.55);--soft:rgba(40,95,235,.20);--faint:rgba(40,95,235,.08);--ink:#f2f4f8;--dim:rgba(242,244,248,.62);--line:rgba(255,255,255,.1);--ok:#5fe39a;--warn:#ffd25a;--lag:#ff9d4d;--bad:#ff6b6b;background:#000!important;color:var(--ink)}
 body.lw-theme.lw-lime{--edge:#d9ff4d;--mid:#8bb300;--deep:#3b4d00;--word:#bde600;--glow:rgba(190,235,0,.5);--soft:rgba(165,210,0,.17);--faint:rgba(165,210,0,.07)}
 
 /* ---------- фон: три canvas Лампы убираем, вместо них один статичный градиент ---------- */
@@ -89,6 +89,90 @@ body.lw-theme .torrent-item.focus{border-color:var(--edge)}
 body.lw-theme .torrent-item__title{font-weight:300}
 body.lw-theme .torrent-item__seeds span{color:#5fe39a}
 body.lw-theme .simple-button{border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12)}
+
+/* ---------- кнопка «Лучшая раздача» на карточке: подпись видна всегда (Лампа прячет её без фокуса) ---------- */
+body.lw-theme .full-start-new__buttons .lw-watch-btn span{display:inline}
+body.lw-theme .lw-watch-btn{background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.03));border-color:var(--edge);color:var(--ink)}
+body.lw-theme .lw-watch-btn svg{color:var(--word)}
+body.lw-theme .lw-watch-btn.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.06));box-shadow:inset 0 0 0 .09em var(--edge)}
+
+/* ---------- окна Lampa Watch: общий каркас ---------- */
+body.lw-theme .modal__footer{flex-wrap:wrap;gap:.7em;padding-top:1.4em}
+body.lw-theme .modal__button{margin:0;padding:.85em 1.5em;border-radius:2em;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);font-weight:300;color:var(--ink)}
+body.lw-theme .modal__button+.modal__button{margin-left:0}
+body.lw-theme .modal__button:first-child{background:linear-gradient(120deg,var(--deep),var(--mid));border-color:rgba(255,255,255,.18)}
+body.lw-theme .modal__button.focus{border-color:transparent;box-shadow:inset 0 0 0 .09em var(--edge)}
+body.lw-theme .lw-box{padding:.2em .1em 0}
+body.lw-theme .lw-kicker{margin-bottom:.6em;font-size:.8em;letter-spacing:.24em;color:var(--word);opacity:1}
+body.lw-theme .lw-title{font-size:1.9em;font-weight:300;letter-spacing:-.03em;line-height:1.15;margin-bottom:.4em}
+body.lw-theme .lw-line{color:var(--dim);opacity:1}
+body.lw-theme .lw-h{margin:1.2em 0 .5em;font-size:.8em;letter-spacing:.22em;color:var(--word);opacity:1}
+body.lw-theme .lw-note{border:1px solid var(--line);border-radius:1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.02));color:var(--dim)}
+body.lw-theme .lw-stats,body.lw-theme .lw-legend,body.lw-theme .lw-chips,body.lw-theme .lw-empty{color:var(--dim);opacity:1}
+body.lw-theme .lw-bar,body.lw-theme .lw-qrow__bar{height:.35em;border-radius:1em;background:rgba(255,255,255,.1)}
+body.lw-theme .lw-bar i,body.lw-theme .lw-qrow__bar i{border-radius:1em;background:linear-gradient(90deg,var(--mid),var(--edge))}
+
+/* ---------- пожелания: плитки по две в ряд, номера 01, 02… ---------- */
+body.lw-theme .lw-box--wishes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:.6em;counter-reset:lwq}
+body.lw-theme .lw-row{display:block;margin:0;padding:.75em 1.1em .8em;border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%);border:1px solid var(--line);color:var(--ink)}
+body.lw-theme .lw-row__name{font-size:.78em;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
+body.lw-theme .lw-row__name::before{counter-increment:lwq;content:counter(lwq,decimal-leading-zero);margin-right:.8em;color:var(--word)}
+body.lw-theme .lw-row__val{margin:.2em 0 0;text-align:left;font-size:1.35em;font-weight:300;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.lw-theme .lw-row.focus,body.lw-theme .lw-tool.focus,body.lw-theme .lw-item.focus,body.lw-theme .lw-more.focus{background:linear-gradient(155deg,var(--soft),rgba(255,255,255,.05) 70%);border-color:var(--edge);box-shadow:inset 0 0 0 .09em var(--edge);color:var(--ink)}
+body.lw-theme .lw-row.focus .lw-row__name{color:var(--word)}
+
+/* ---------- значки: контур, цветной у «горячих» ---------- */
+body.lw-theme .lw-badge{padding:.12em .75em;border:1px solid var(--line);border-radius:2em;background:none;color:var(--dim)}
+body.lw-theme .lw-badge--hot,body.lw-theme .lw-item.focus .lw-badge--hot{border-color:var(--edge);background:none;color:var(--edge)}
+body.lw-theme .lw-item.focus .lw-badge{background:none;color:var(--ink)}
+
+/* ---------- результат: прогноз и проверки ---------- */
+body.lw-theme .lw-verdict{padding:.8em 1.1em;border:1px solid;border-radius:1.1em;color:var(--dim)}
+body.lw-theme .lw-verdict b{font-size:1.15em;font-weight:400;color:var(--ink)}
+body.lw-theme .lw-verdict--smooth{background:rgba(95,227,154,.08);border-color:rgba(95,227,154,.45)}
+body.lw-theme .lw-verdict--smooth b{color:var(--ok)}
+body.lw-theme .lw-verdict--edge{background:rgba(255,210,90,.08);border-color:rgba(255,210,90,.45)}
+body.lw-theme .lw-verdict--edge b{color:var(--warn)}
+body.lw-theme .lw-verdict--lag{background:rgba(255,157,77,.09);border-color:rgba(255,157,77,.5)}
+body.lw-theme .lw-verdict--lag b{color:var(--lag)}
+body.lw-theme .lw-verdict--bad{background:rgba(255,107,107,.09);border-color:rgba(255,107,107,.5)}
+body.lw-theme .lw-verdict--bad b{color:var(--bad)}
+body.lw-theme .lw-checks{display:flex;flex-wrap:wrap;margin:.2em -.2em .4em}
+body.lw-theme .lw-check{margin:.2em;padding:.2em .85em;border:1px solid var(--line);border-radius:2em;font-size:.95em}
+body.lw-theme .lw-check--ok::before{color:var(--ok)}
+body.lw-theme .lw-check--miss::before{color:var(--bad)}
+body.lw-theme .lw-check--better::before{color:var(--warn)}
+
+/* ---------- статистика и список раздач ---------- */
+body.lw-theme .lw-card{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025))}
+body.lw-theme .lw-card b{font-weight:300;letter-spacing:-.03em}
+body.lw-theme .lw-card span,body.lw-theme .lw-qrow__name,body.lw-theme .lw-qrow__n{color:var(--dim);opacity:1}
+body.lw-theme .lw-tool,body.lw-theme .lw-more{border:1px solid rgba(255,255,255,.12);border-radius:2em;background:rgba(255,255,255,.07)}
+body.lw-theme .lw-tool b{font-weight:400;color:var(--word)}
+body.lw-theme .lw-item{border:1px solid var(--line);border-radius:1.1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%)}
+body.lw-theme .lw-item__title{font-weight:300}
+body.lw-theme .lw-item__side b{font-weight:400}
+body.lw-theme .lw-item__meta{color:var(--dim);opacity:1}
+body.lw-theme .lw-dot{display:flex;align-items:center;justify-content:center;width:1.7em;height:1.7em;font-size:.9em;font-weight:700;color:#000}
+body.lw-theme .lw-dot--smooth{background:var(--ok)}
+body.lw-theme .lw-dot--smooth::before{content:"\2713"}
+body.lw-theme .lw-dot--edge{background:var(--warn)}
+body.lw-theme .lw-dot--edge::before{content:"\2248"}
+body.lw-theme .lw-dot--lag{background:var(--lag)}
+body.lw-theme .lw-dot--lag::before{content:"!"}
+body.lw-theme .lw-dot--bad{background:var(--bad)}
+body.lw-theme .lw-dot--bad::before{content:"\2715"}
+
+/* ---------- подбор парсера и настройка TorrServer ---------- */
+body.lw-theme .lw-prow,body.lw-theme .lw-tc{border:1px solid var(--line);border-radius:1em;background:linear-gradient(155deg,var(--faint),rgba(255,255,255,.025) 70%)}
+body.lw-theme .lw-prow--best{border-color:var(--edge);box-shadow:inset 0 0 0 1px var(--edge)}
+body.lw-theme .lw-prow__tag{border:1px solid var(--edge);background:none;color:var(--edge)}
+body.lw-theme .lw-prow--run .lw-prow__dot{background:var(--warn)}
+body.lw-theme .lw-prow--ok .lw-prow__dot{background:var(--ok)}
+body.lw-theme .lw-prow--bad .lw-prow__dot{background:var(--bad)}
+body.lw-theme .lw-prow__info,body.lw-theme .lw-tc__why,body.lw-theme .lw-chg__k{color:var(--dim);opacity:1}
+body.lw-theme .lw-tc__name{font-weight:400}
+body.lw-theme .lw-chg{border-bottom-color:var(--line)}
 
 /* ---------- защита OLED ---------- */
 body.lw-theme .head,body.lw-theme .card,body.lw-theme .items-line{transition:opacity .6s}

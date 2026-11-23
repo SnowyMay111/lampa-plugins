@@ -459,7 +459,7 @@ function openWishes(movie) {
     var w = loadWishes();
     var tv = SP.isTv(movie);
     var seasons = tv ? seasonList(movie) : [];
-    var box = h('div', 'lw-box');
+    var box = h('div', 'lw-box lw-box--wishes');
     var rows = {};
 
     if (tv && seasons.length) w.season = seasons[0].n;

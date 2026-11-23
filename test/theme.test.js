@@ -213,6 +213,32 @@ async function test(name, fn) {
         assert.ok(!/transition\s*:[^;}]*\b(width|height|top|left|margin)\b/.test(css), 'анимируем только transform и opacity');
     });
 
+    await test('у окон плагина нет белой заливки выбора: каждый прежний .focus с #fff переопределён темой', () => {
+        const watch = fs.readFileSync(path.join(SRC, 'watch.js'), 'utf8') + fs.readFileSync(path.join(SRC, 'setup.js'), 'utf8');
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+        const old = [];
+
+        // правила вида '.lw-row.focus{background:#fff;color:#000}' в строках addStyle
+        watch.replace(/'([^']*\.focus[^']*)\{[^'}]*background:#fff/g, (m, sel) => { sel.split(',').forEach((s) => old.push(s.trim())); return m; });
+
+        assert.ok(old.length >= 4, 'нашли прежние правила выбора: ' + old.length);
+
+        old.forEach((sel) => {
+            const re = new RegExp('body\\.lw-theme\\s+' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[^{]*\\{[^}]*box-shadow\\s*:\\s*inset');
+
+            assert.ok(re.test(css), 'тема переопределяет выбор: ' + sel);
+        });
+    });
+
+    await test('кнопка «Лучшая раздача» показывает подпись даже без фокуса, а окно пожеланий — сетка плиток', () => {
+        const css = fs.readFileSync(path.join(SRC, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+        const watch = fs.readFileSync(path.join(SRC, 'watch.js'), 'utf8');
+
+        assert.ok(/body\.lw-theme \.full-start-new__buttons \.lw-watch-btn span\{display:inline\}/.test(css.replace(/\s+/g, ' ').replace(/\s*([{};])\s*/g, '$1')), 'подпись кнопки включена');
+        assert.ok(/\.lw-box--wishes\{[^}]*display:grid/.test(css), 'пожелания: сетка');
+        assert.ok(watch.indexOf("'lw-box lw-box--wishes'") >= 0, 'окно пожеланий помечено классом');
+    });
+
     results.forEach(([ok, name]) => console.log((ok ? 'PASS  ' : 'FAIL  ') + name));
     const failed = results.filter((r) => !r[0]).length;
 
